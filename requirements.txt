@@ -1,0 +1,28 @@
+# --- core (required) -------------------------------------------------------
+numpy>=1.26
+scipy>=1.11
+pandas>=2.1
+SQLAlchemy>=2.0
+requests>=2.31
+python-dotenv>=1.0
+PuLP>=3.3.2
+
+# --- optional but recommended ---------------------------------------------
+scikit-learn>=1.3        # learned minutes model + isotonic calibration.
+                         # Without it the heuristic fallback is used, which is
+                         # not a failure: an uncalibrated GBM is worse than a
+                         # well-calibrated heuristic for a Monte Carlo that
+                         # consumes its output as probabilities.
+psycopg2-binary>=2.9     # Postgres driver (SQLite needs no driver at all)
+fastapi>=0.110           # API server, consumed by the Next.js dashboard
+uvicorn[standard]>=0.27
+rapidfuzz>=3.6           # fuzzy identity resolution: FBref names to FPL ids,
+                         # and bookmaker team names to fixture ids
+beautifulsoup4>=4.12     # HTML parsing for ingestion/lineup_news.py
+alembic>=1.13            # migrations
+streamlit>=1.31          # legacy UI in ui/app.py; the Next.js dashboard in
+plotly>=5.18             # dashboard/ supersedes it
+openai>=1.12             # LLM explanations (any OpenAI-compatible endpoint)
+
+# --- development -----------------------------------------------------------
+pytest>=8.0

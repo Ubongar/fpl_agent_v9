@@ -1,0 +1,16 @@
+{
+    "workbench.colorCustomizations": {},
+    "sqltools.connections": [
+        {
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 5432,
+            "askForPassword": true,
+            "driver": "PostgreSQL",
+            "database": "fpl_agent",
+            "name": "localhost",
+            "username": "postgres"
+        }
+    ]
+}

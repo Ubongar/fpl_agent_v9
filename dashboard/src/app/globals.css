@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+:root {
+  --bg: #090c10;
+  --panel: #10151b;
+  --panel-2: #0c1116;
+  --line: #202833;
+  --fg: #edf2f7;
+  --muted: #8994a4;
+  --accent: #65a6ff;
+  --good: #50d18d;
+  --warn: #f2b76a;
+  --bad: #ff6f74;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f7fa;
+    --panel: #ffffff;
+    --panel-2: #f8fafc;
+    --line: #dde3ea;
+    --fg: #111827;
+    --muted: #657080;
+    --accent: #245fb8;
+    --good: #23784c;
+    --warn: #a05e08;
+    --bad: #b52e33;
+  }
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { background: var(--bg); color: var(--fg); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+button, input, select { font: inherit; }
+table { border-collapse: collapse; }
+::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+
+.panel-glow {
+  background:
+    radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 38%),
+    var(--panel);
+}
+
+.soft-grid {
+  background-image: linear-gradient(to right, color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--line) 45%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.scrollbar-thin::-webkit-scrollbar { height: 7px; width: 7px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
+
+/* v3 workspace polish */
+::selection { background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--fg); }
+button, a { -webkit-tap-highlight-color: transparent; }
+input[type="range"] { accent-color: var(--accent); }

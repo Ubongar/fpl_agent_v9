@@ -1,0 +1,466 @@
+{
+  "leagues": {
+    "Championship": {
+      "n_matched_players": 48,
+      "ratios": [
+        {
+          "source_league": "Championship",
+          "position_group": "ATT",
+          "metric": "np_g90",
+          "ratio": 1.2376,
+          "n_players": 8,
+          "source_minutes": 21917.0,
+          "target_minutes": 1823.0,
+          "meets_gate": true,
+          "confidence": 0.456
+        },
+        {
+          "source_league": "Championship",
+          "position_group": "ATT",
+          "metric": "a90",
+          "ratio": 1.7175,
+          "n_players": 8,
+          "source_minutes": 21917.0,
+          "target_minutes": 1823.0,
+          "meets_gate": true,
+          "confidence": 0.456
+        },
+        {
+          "source_league": "Championship",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 1.4031,
+          "n_players": 22,
+          "source_minutes": 101080.0,
+          "target_minutes": 7063.0,
+          "meets_gate": true,
+          "confidence": 0.588
+        },
+        {
+          "source_league": "Championship",
+          "position_group": "DEF",
+          "metric": "a90",
+          "ratio": 0.4824,
+          "n_players": 22,
+          "source_minutes": 101080.0,
+          "target_minutes": 7063.0,
+          "meets_gate": true,
+          "confidence": 0.588
+        },
+        {
+          "source_league": "Championship",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 0.9179,
+          "n_players": 30,
+          "source_minutes": 105111.0,
+          "target_minutes": 7366.0,
+          "meets_gate": true,
+          "confidence": 0.592
+        },
+        {
+          "source_league": "Championship",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 0.756,
+          "n_players": 30,
+          "source_minutes": 105111.0,
+          "target_minutes": 7366.0,
+          "meets_gate": true,
+          "confidence": 0.592
+        }
+      ],
+      "external_records_linked": 0
+    },
+    "Bundesliga": {
+      "n_matched_players": 15,
+      "ratios": [
+        {
+          "source_league": "Bundesliga",
+          "position_group": "ATT",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 2,
+          "source_minutes": 2455.0,
+          "target_minutes": 448.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Bundesliga",
+          "position_group": "ATT",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 2,
+          "source_minutes": 2455.0,
+          "target_minutes": 448.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Bundesliga",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 1.2022,
+          "n_players": 4,
+          "source_minutes": 10216.0,
+          "target_minutes": 1214.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Bundesliga",
+          "position_group": "DEF",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 4,
+          "source_minutes": 10216.0,
+          "target_minutes": 1214.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Bundesliga",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 1.0834,
+          "n_players": 10,
+          "source_minutes": 20967.0,
+          "target_minutes": 2903.0,
+          "meets_gate": true,
+          "confidence": 0.5
+        },
+        {
+          "source_league": "Bundesliga",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 0.7851,
+          "n_players": 10,
+          "source_minutes": 20967.0,
+          "target_minutes": 2903.0,
+          "meets_gate": true,
+          "confidence": 0.5
+        }
+      ],
+      "external_records_linked": 0
+    },
+    "La Liga": {
+      "n_matched_players": 15,
+      "ratios": [
+        {
+          "source_league": "La Liga",
+          "position_group": "ATT",
+          "metric": "np_g90",
+          "ratio": 0.5325,
+          "n_players": 3,
+          "source_minutes": 5180.0,
+          "target_minutes": 1024.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "La Liga",
+          "position_group": "ATT",
+          "metric": "a90",
+          "ratio": 0.4215,
+          "n_players": 3,
+          "source_minutes": 5180.0,
+          "target_minutes": 1024.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "La Liga",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 1.5221,
+          "n_players": 6,
+          "source_minutes": 16206.0,
+          "target_minutes": 1183.0,
+          "meets_gate": true,
+          "confidence": 0.415
+        },
+        {
+          "source_league": "La Liga",
+          "position_group": "DEF",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 6,
+          "source_minutes": 16206.0,
+          "target_minutes": 1183.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "La Liga",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 0.2632,
+          "n_players": 6,
+          "source_minutes": 13942.0,
+          "target_minutes": 1394.0,
+          "meets_gate": true,
+          "confidence": 0.43
+        },
+        {
+          "source_league": "La Liga",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 6,
+          "source_minutes": 13942.0,
+          "target_minutes": 1394.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        }
+      ],
+      "external_records_linked": 0
+    },
+    "Serie A": {
+      "n_matched_players": 11,
+      "ratios": [
+        {
+          "source_league": "Serie A",
+          "position_group": "ATT",
+          "metric": "np_g90",
+          "ratio": 2.0178,
+          "n_players": 1,
+          "source_minutes": 454.0,
+          "target_minutes": 225.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Serie A",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 5.6975,
+          "n_players": 5,
+          "source_minutes": 10358.0,
+          "target_minutes": 1212.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Serie A",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 0.6505,
+          "n_players": 4,
+          "source_minutes": 6393.0,
+          "target_minutes": 756.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Serie A",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 4,
+          "source_minutes": 6393.0,
+          "target_minutes": 756.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        }
+      ],
+      "external_records_linked": 0
+    },
+    "Ligue 1": {
+      "n_matched_players": 18,
+      "ratios": [
+        {
+          "source_league": "Ligue 1",
+          "position_group": "ATT",
+          "metric": "np_g90",
+          "ratio": 1.1265,
+          "n_players": 3,
+          "source_minutes": 7096.0,
+          "target_minutes": 681.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Ligue 1",
+          "position_group": "ATT",
+          "metric": "a90",
+          "ratio": 0.6512,
+          "n_players": 3,
+          "source_minutes": 7096.0,
+          "target_minutes": 681.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Ligue 1",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 6,
+          "source_minutes": 11381.0,
+          "target_minutes": 1522.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Ligue 1",
+          "position_group": "DEF",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 6,
+          "source_minutes": 11381.0,
+          "target_minutes": 1522.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Ligue 1",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 1.0058,
+          "n_players": 6,
+          "source_minutes": 11376.0,
+          "target_minutes": 1508.0,
+          "meets_gate": true,
+          "confidence": 0.438
+        },
+        {
+          "source_league": "Ligue 1",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 1.6399,
+          "n_players": 6,
+          "source_minutes": 11376.0,
+          "target_minutes": 1508.0,
+          "meets_gate": true,
+          "confidence": 0.438
+        }
+      ],
+      "external_records_linked": 0
+    },
+    "Primeira Liga": {
+      "n_matched_players": 5,
+      "ratios": [
+        {
+          "source_league": "Primeira Liga",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 3,
+          "source_minutes": 9617.0,
+          "target_minutes": 778.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Primeira Liga",
+          "position_group": "DEF",
+          "metric": "a90",
+          "ratio": 1.5451,
+          "n_players": 3,
+          "source_minutes": 9617.0,
+          "target_minutes": 778.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Primeira Liga",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 1,
+          "source_minutes": 1441.0,
+          "target_minutes": 164.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Primeira Liga",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 1,
+          "source_minutes": 1441.0,
+          "target_minutes": 164.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        }
+      ],
+      "external_records_linked": 0
+    },
+    "Eredivisie": {
+      "n_matched_players": 7,
+      "ratios": [
+        {
+          "source_league": "Eredivisie",
+          "position_group": "ATT",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 1,
+          "source_minutes": 1555.0,
+          "target_minutes": 310.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Eredivisie",
+          "position_group": "ATT",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 1,
+          "source_minutes": 1555.0,
+          "target_minutes": 310.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Eredivisie",
+          "position_group": "DEF",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 2,
+          "source_minutes": 5150.0,
+          "target_minutes": 604.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Eredivisie",
+          "position_group": "DEF",
+          "metric": "a90",
+          "ratio": 1.4211,
+          "n_players": 2,
+          "source_minutes": 5150.0,
+          "target_minutes": 604.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Eredivisie",
+          "position_group": "MID",
+          "metric": "np_g90",
+          "ratio": 0.0,
+          "n_players": 2,
+          "source_minutes": 3845.0,
+          "target_minutes": 324.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        },
+        {
+          "source_league": "Eredivisie",
+          "position_group": "MID",
+          "metric": "a90",
+          "ratio": 0.0,
+          "n_players": 2,
+          "source_minutes": 3845.0,
+          "target_minutes": 324.0,
+          "meets_gate": false,
+          "confidence": 0.1
+        }
+      ],
+      "external_records_linked": 0
+    }
+  },
+  "total_fitted": 38,
+  "total_gate_passed": 12
+}
