@@ -35,6 +35,7 @@ import logging
 from dataclasses import dataclass, field
 
 from fplagent.config import PARAMS
+from fplagent.optimizers import _lp
 
 log = logging.getLogger(__name__)
 
@@ -178,23 +179,12 @@ def optimise_squad(
         for p in pool
     ]
 
-    squad = pulp.LpVariable.dicts(
-        "squad",
-        ids,
-        cat="Binary",
-    )
-
-    start = pulp.LpVariable.dicts(
-        "start",
-        ids,
-        cat="Binary",
-    )
-
-    cap = pulp.LpVariable.dicts(
-        "cap",
-        ids,
-        cat="Binary",
-    )
+    # Variables are created through optimizers/_lp.py. PuLP 4.0 removed both
+    # `LpVariable.dicts()` and the standalone `LpVariable(name, ...)`
+    # constructor, so neither can be called directly and still run on 4.x.
+    squad = {i: _lp.binary(prob, f"squad_{i}") for i in ids}
+    start = {i: _lp.binary(prob, f"start_{i}") for i in ids}
+    cap = {i: _lp.binary(prob, f"cap_{i}") for i in ids}
 
     prob += pulp.lpSum(
         value[i] * start[i]
@@ -280,16 +270,9 @@ def optimise_squad(
         if i in squad:
             prob += squad[i] == 1
 
-    prob.solve(
-        pulp.PULP_CBC_CMD(
-            msg=False,
-            timeLimit=time_limit,
-        )
-    )
+    status = _lp.solve(prob, time_limit)
 
-    status = pulp.LpStatus[prob.status]
-
-    # "Not Solved" means CBC hit the time limit without proving optimality.
+    # "Not Solved" means the solver hit the time limit without proving optimality.
     # v6 accepted it, then read .value() off unsolved variables, got None for
     # every one, and returned an EMPTY squad with a success-shaped status.
     # A timeout is a result you can sometimes use and must always be told
@@ -463,17 +446,10 @@ def best_xi_from_squad(
         pulp.LpMaximize,
     )
 
-    start = pulp.LpVariable.dicts(
-        "start",
-        ids,
-        cat="Binary",
-    )
-
-    cap = pulp.LpVariable.dicts(
-        "cap",
-        ids,
-        cat="Binary",
-    )
+    # See the matching comment in `optimise_squad`: variables come from
+    # optimizers/_lp.py so this runs on PuLP 3.x and 4.x alike.
+    start = {i: _lp.binary(prob, f"start_{i}") for i in ids}
+    cap = {i: _lp.binary(prob, f"cap_{i}") for i in ids}
 
     prob += pulp.lpSum(
         value[i] * start[i]
@@ -520,13 +496,7 @@ def best_xi_from_squad(
             for i in members
         ) <= XI_MAX[pos]
 
-    prob.solve(
-        pulp.PULP_CBC_CMD(
-            msg=False
-        )
-    )
-
-    status = pulp.LpStatus[prob.status]
+    status = _lp.solve(prob)
 
     # An infeasible squad (e.g. too few available at a position) leaves the
     # variables at arbitrary or None values; reading them would present an
@@ -604,5 +574,6 @@ def best_xi_from_squad(
             f"{counts['MID']}-"
             f"{counts['FWD']}"
         ),
+        objective=float(pulp.value(prob.objective) or 0.0),
         status=status,
     )

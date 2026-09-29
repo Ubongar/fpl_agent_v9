@@ -19,6 +19,9 @@ export default function PlayerLab() {
   const [selected, setSelected] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // localStorage is unavailable during server render, so the saved comparison
+  // set must be read after mount; this one-time setState-in-effect is intentional.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(COMPARE_STORAGE) ?? "[]");
@@ -28,6 +31,7 @@ export default function PlayerLab() {
       .then((r) => setRows(r.players))
       .catch((e) => setError(e instanceof BrowserApiError ? e.message : "Could not load players."));
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

@@ -27,6 +27,7 @@ export interface PlayerPrediction {
   p_start: number | null;
   p_sixty: number;
   p_haul_10plus: number | null;
+  p_blank_le2: number | null;
   n_fixtures: number;
   value: number | null;
   model_version: string;
@@ -61,6 +62,11 @@ export interface PlayerDetail {
   inputs: Record<string, unknown>;
   quantile_grid: number[];
   decision?: DecisionMetrics;
+  flags?: { code: string; message: string; severity?: string }[];
+  n_fixtures?: number;
+  /** Present only when a live lineup overlay was applied. */
+  lineup_news?: unknown;
+  freshness?: { age_hours: number | null; note: string };
 }
 
 export interface TeamStrength {
@@ -314,11 +320,33 @@ export interface DashboardOverview {
   market: Record<string, unknown>[];
 }
 
+export interface CompareFixture {
+  gw: number;
+  opponent: string;
+  home: boolean;
+  /** 1 (easiest) to 5 (hardest), chosen for the player's position. */
+  difficulty: number;
+}
+
+export interface CompareFlag {
+  code: string;
+  message: string;
+  severity?: string;
+}
+
+/** A DashboardPlayer plus the comparison-only fields from /players/compare. */
+export interface ComparePlayer extends DashboardPlayer {
+  flags: CompareFlag[];
+  next_fixtures: CompareFixture[];
+  avg_difficulty: number | null;
+}
+
 export interface CompareResponse {
   season: number;
   gw: number;
-  players: DashboardPlayer[];
+  players: ComparePlayer[];
   missing: number[];
+  fixture_horizon?: number;
 }
 
 export interface FixtureOutlook {

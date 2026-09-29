@@ -2,7 +2,6 @@ import Link from "next/link";
 import { marketWatch } from "@/lib/api";
 import { EmptyState, Panel, Stat } from "@/components/ui";
 import { MarketBars } from "@/components/Viz";
-import { money, pct } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 

@@ -10,7 +10,9 @@ and can be run from the CLI without a server.
 from __future__ import annotations
 
 import json
+import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -22,10 +24,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from fplagent import __version__
-from fplagent.config import CURRENT_SEASON, TOTAL_MANAGERS
+from fplagent.config import CURRENT_SEASON, DATABASE_URL, TOTAL_MANAGERS
 from fplagent.db import tables as T
 from fplagent.db.repository import read_sql, resolve_target_gw
 from fplagent.db.serialize import to_json_safe
+
+log = logging.getLogger(__name__)
 
 
 class SafeJSONResponse(JSONResponse):
@@ -46,12 +50,63 @@ def require_api_key(x_api_key: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="invalid or missing API key")
 
 
+def _looks_like_local_only() -> bool:
+    """Best-effort guess at whether this process is a local/dev deployment.
+
+    The app has no reliable way to see the bind host uvicorn was started
+    with -- that lives in the ASGI server's own config, not in FastAPI.
+    DATABASE_URL is a proxy that is available in-process and correlates
+    well in practice: a real deployment almost always points at a remote
+    Postgres, while local/dev runs use the SQLite default or a
+    localhost/127.0.0.1 Postgres. This is a heuristic for a *warning*, not
+    a security control -- it can be wrong in either direction, which is
+    exactly why the check below only ever logs, never blocks.
+    """
+    url = DATABASE_URL.lower()
+    if url.startswith("sqlite"):
+        return True
+    return "localhost" in url or "127.0.0.1" in url
+
+
+def _warn_if_open() -> None:
+    """Loud, impossible-to-miss log line when auth is off.
+
+    Silence here is exactly how "local/dev mode remains open" quietly
+    becomes "the internet can call /optimise/squad and /manager/{id}/team
+    with no key". This never blocks startup -- an open local dev server is
+    a legitimate, common setup -- it just makes sure nobody finds out they
+    forgot to set FPL_AGENT_API_KEY from a support ticket instead of a log.
+    """
+    if API_KEY:
+        return
+    if _looks_like_local_only():
+        log.info(
+            "FPL_AGENT_API_KEY is not set -- API is unauthenticated. "
+            "Fine for local/dev use against %s.", DATABASE_URL,
+        )
+    else:
+        log.warning(
+            "*** FPL_AGENT_API_KEY is not set and DATABASE_URL does not "
+            "look local (%s). Every endpoint, including /optimise/squad "
+            "and /manager/{entry_id}/team, is reachable with NO "
+            "authentication. Set FPL_AGENT_API_KEY before exposing this "
+            "beyond localhost. ***", DATABASE_URL,
+        )
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _warn_if_open()
+    yield
+
+
 app = FastAPI(
     title="FPL Agent",
     version=__version__,
     description="Prediction, simulation and optimisation for Fantasy Premier League.",
     default_response_class=SafeJSONResponse,
     dependencies=[Depends(require_api_key)] if API_KEY else [],
+    lifespan=_lifespan,
 )
 
 _origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8501")
@@ -60,6 +115,7 @@ app.add_middleware(
     allow_origins=[o.strip() for o in _origins.split(",") if o.strip()],
     allow_methods=["*"], allow_headers=["*"],
 )
+
 
 
 def _num(x, default: float = 0.0) -> float:
@@ -893,19 +949,112 @@ class CompareRequest(BaseModel):
     gw: int | None = None
 
 
+COMPARE_FIXTURE_HORIZON = 5
+
+
+def _position_difficulty(position: str | None, row: dict) -> float:
+    """Pick the difficulty that matters for a position.
+
+    GK/DEF are paid for clean sheets (defensive difficulty); FWD for goals
+    (attacking difficulty); MID is paid for both, so it takes the mean.
+    """
+    d, a = float(row["def_difficulty"]), float(row["att_difficulty"])
+    if position in ("GK", "DEF"):
+        return d
+    if position == "FWD":
+        return a
+    return (d + a) / 2.0
+
+
 @app.post("/players/compare", tags=["dashboard"])
 def compare_players(req: CompareRequest):
+    from fplagent.models.consistency import check_prediction
     from fplagent.pipeline.run import latest_predictions
     df = latest_predictions(req.season, req.gw)
     if df.empty:
         raise HTTPException(404, "No predictions stored.")
     wanted = [int(x) for x in req.player_ids]
-    rows = _decision_pack(df[df["player_id"].isin(wanted)].copy(), req.season, int(df["gw"].min()))
+    gw0 = int(df["gw"].min())
+    rows = _decision_pack(df[df["player_id"].isin(wanted)].copy(), req.season, gw0)
     missing = [x for x in wanted if x not in set(rows["player_id"].astype(int))]
     if rows.empty:
         raise HTTPException(404, "None of those players has a current prediction.")
     cols = ["player_id","web_name","position","short_name","team_id","now_cost","xp_mean","xp_p10","xp_p25","xp_p50","xp_p75","xp_p90","p_play","p_start","p_sixty","p_haul_10plus","p_blank_le2","xp_se","value","certainty","upside_points","downside_points","range_points","start_security","sixty_security","minutes_stability","floor_adjusted_xp","ceiling_adjusted_xp","ownership_adjusted_upside","ownership_adjusted_downside","quartile_range_points","start_gap","bench_risk","floor_value_per_million","ceiling_value_per_million","ownership"]
-    return {"season": req.season, "gw": int(rows["gw"].iloc[0]), "players": rows[cols].to_dict("records"), "missing": missing}
+    records = rows[cols].to_dict("records")
+
+    # Upcoming fixtures per player's team, difficulty chosen by position.
+    fx = _fixture_difficulty_rows(req.season, int(rows["gw"].iloc[0]), COMPARE_FIXTURE_HORIZON)
+    by_team = {int(t): g.sort_values("gw") for t, g in fx.groupby("team_id")} if not fx.empty else {}
+
+    for rec in records:
+        # Single-gameweek consistency flags. The week-over-week flag needs the
+        # prior gameweek's row, which this endpoint does not load, so it stays
+        # on /predictions/{player_id} where that history is already fetched.
+        rec["flags"] = [f.__dict__ for f in check_prediction({
+            "xp_mean": rec.get("xp_mean"), "p_play": rec.get("p_play"),
+            "xp_p10": rec.get("xp_p10"), "xp_p90": rec.get("xp_p90")})]
+        team_fx = by_team.get(int(rec["team_id"])) if rec.get("team_id") is not None else None
+        nxt = []
+        if team_fx is not None:
+            for r in team_fx.to_dict("records"):
+                nxt.append({"gw": int(r["gw"]), "opponent": r["opponent"], "home": bool(r["home"]),
+                            "difficulty": round(_position_difficulty(rec.get("position"), r), 2)})
+        rec["next_fixtures"] = nxt
+        rec["avg_difficulty"] = round(sum(f["difficulty"] for f in nxt) / len(nxt), 2) if nxt else None
+    return {"season": req.season, "gw": int(rows["gw"].iloc[0]), "players": records,
+            "missing": missing, "fixture_horizon": COMPARE_FIXTURE_HORIZON}
+
+
+def _fixture_difficulty_rows(season: int, gw: int, horizon: int) -> pd.DataFrame:
+    """One row per (team, fixture) from `gw` for `horizon` gameweeks.
+
+    Three difficulty numbers on a 1-5 scale (5 = hardest), because a single
+    number cannot be right for every position:
+
+      def_difficulty  how hard it is to keep a clean sheet / avoid conceding:
+                      opponent attack against this team's own defence. This
+                      is the original `difficulty` formula, unchanged.
+      att_difficulty  how hard it is to score: this team's attack against the
+                      opponent's defence. Ratings are log-space with
+                      lambda = exp(mu + alpha_attack - beta_defence), so a
+                      HIGHER opponent defence rating makes scoring harder.
+      difficulty      alias of def_difficulty, kept so /fixtures/outlook and
+                      its dashboard page are byte-for-byte compatible.
+
+    Returns an empty frame when there are no fixtures in the window.
+    """
+    fixtures = read_sql(select(T.fixtures).where(
+        (T.fixtures.c.season == season) & (T.fixtures.c.gw >= gw) & (T.fixtures.c.gw < gw + horizon)))
+    if fixtures.empty:
+        return pd.DataFrame()
+    strengths = read_sql(select(T.team_strength).where(
+        (T.team_strength.c.season == season) & (T.team_strength.c.gw == gw)))
+    s = {int(r.team_id): r for r in strengths.itertuples()}
+    teams_df = read_sql(select(T.teams).where(T.teams.c.season == season))
+    names = {int(r.team_id): (r.name, r.short_name) for r in teams_df.itertuples()}
+    rows = []
+    for r in fixtures.itertuples():
+        for team_id, opp_id, home in ((int(r.home_team_id), int(r.away_team_id), True),
+                                      (int(r.away_team_id), int(r.home_team_id), False)):
+            opp = s.get(opp_id)
+            own = s.get(team_id)
+            def_d = att_d = 3.0
+            if opp is not None:
+                own_def = float(own.defence) if own is not None else 0.0
+                own_att = float(own.attack) if own is not None else 0.0
+                def_d = float(np.clip(3.0 + 0.9 * float(opp.attack) - 0.9 * own_def, 1.0, 5.0))
+                att_d = float(np.clip(3.0 + 0.9 * float(opp.defence) - 0.9 * own_att, 1.0, 5.0))
+            rows.append({
+                "gw": int(r.gw), "team_id": team_id,
+                "team": names.get(team_id, (str(team_id), str(team_id)))[1],
+                "opponent_id": opp_id,
+                "opponent": names.get(opp_id, (str(opp_id), str(opp_id)))[1],
+                "home": home,
+                "difficulty": round(def_d, 2),
+                "def_difficulty": round(def_d, 2),
+                "att_difficulty": round(att_d, 2),
+            })
+    return pd.DataFrame(rows)
 
 
 @app.get("/fixtures/outlook", tags=["dashboard"])
@@ -914,24 +1063,15 @@ def fixture_outlook(season: int = CURRENT_SEASON, start_gw: int | None = None, h
     gw = start_gw or resolve_target_gw(season)
     if gw is None:
         raise HTTPException(404, "No gameweek data stored.")
-    fixtures = read_sql(select(T.fixtures).where((T.fixtures.c.season == season) & (T.fixtures.c.gw >= gw) & (T.fixtures.c.gw < gw + horizon)))
-    if fixtures.empty:
+    out = _fixture_difficulty_rows(season, gw, horizon)
+    if out.empty:
         raise HTTPException(404, "No fixtures available for this horizon.")
-    strengths = read_sql(select(T.team_strength).where((T.team_strength.c.season == season) & (T.team_strength.c.gw == gw)))
-    s = {int(r.team_id): r for r in strengths.itertuples()}
-    teams_df = read_sql(select(T.teams).where(T.teams.c.season == season))
-    names = {int(r.team_id): (r.name, r.short_name) for r in teams_df.itertuples()}
-    rows = []
-    for r in fixtures.itertuples():
-        for team_id, opp_id, home in ((int(r.home_team_id), int(r.away_team_id), True), (int(r.away_team_id), int(r.home_team_id), False)):
-            opp = s.get(opp_id); own = s.get(team_id)
-            difficulty = 3.0
-            if opp is not None:
-                difficulty = float(np.clip(3.0 + 0.9 * float(opp.attack) - 0.9 * float(own.defence if own is not None else 0.0), 1.0, 5.0))
-            rows.append({"gw": int(r.gw), "team_id": team_id, "team": names.get(team_id, (str(team_id), str(team_id)))[1], "opponent_id": opp_id, "opponent": names.get(opp_id, (str(opp_id), str(opp_id)))[1], "home": home, "difficulty": round(difficulty, 2)})
-    out = pd.DataFrame(rows)
-    team_summary = out.groupby(["team_id","team"], as_index=False).agg(avg_difficulty=("difficulty","mean"), best_fixture=("difficulty","min"), worst_fixture=("difficulty","max"), fixtures=("gw","count"))
-    return {"season": season, "start_gw": gw, "horizon": horizon, "fixtures": out.to_dict("records"), "teams": team_summary.sort_values("avg_difficulty").to_dict("records")}
+    team_summary = out.groupby(["team_id", "team"], as_index=False).agg(
+        avg_difficulty=("difficulty", "mean"), best_fixture=("difficulty", "min"),
+        worst_fixture=("difficulty", "max"), fixtures=("gw", "count"))
+    return {"season": season, "start_gw": gw, "horizon": horizon,
+            "fixtures": out.to_dict("records"),
+            "teams": team_summary.sort_values("avg_difficulty").to_dict("records")}
 
 
 @app.get("/market/watch", tags=["dashboard"])

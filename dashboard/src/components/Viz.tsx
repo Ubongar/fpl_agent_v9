@@ -6,16 +6,11 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   Line,
-  LineChart,
   ResponsiveContainer,
-  Scatter,
-  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
-  ZAxis,
 } from "recharts";
 
 export function DistributionViz({ p10, p50, p90, mean }: { p10: number; p50: number; p90: number; mean: number }) {

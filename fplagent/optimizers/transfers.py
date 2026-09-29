@@ -34,6 +34,7 @@ import logging
 from dataclasses import dataclass, field
 
 
+from fplagent.optimizers import _lp
 from fplagent.optimizers.squad import MAX_PER_CLUB, SQUAD_QUOTA, XI_MAX, XI_MIN
 
 log = logging.getLogger(__name__)
@@ -123,12 +124,12 @@ def plan_transfers(current_squad: list[dict], candidate_pool: list[dict],
     prob = pulp.LpProblem("fpl_transfers", pulp.LpMaximize)
 
     # own[i][g] : do we hold player i during gameweek g
-    own = {(i, g): pulp.LpVariable(f"own_{i}_{g}", cat="Binary") for i in ids for g in gws}
-    start = {(i, g): pulp.LpVariable(f"st_{i}_{g}", cat="Binary") for i in ids for g in gws}
-    cap = {(i, g): pulp.LpVariable(f"cap_{i}_{g}", cat="Binary") for i in ids for g in gws}
-    buy = {(i, g): pulp.LpVariable(f"buy_{i}_{g}", cat="Binary") for i in ids for g in gws}
-    sell = {(i, g): pulp.LpVariable(f"sell_{i}_{g}", cat="Binary") for i in ids for g in gws}
-    hits = {g: pulp.LpVariable(f"hits_{g}", lowBound=0, cat="Integer") for g in gws}
+    own = {(i, g): _lp.binary(prob, f"own_{i}_{g}") for i in ids for g in gws}
+    start = {(i, g): _lp.binary(prob, f"st_{i}_{g}") for i in ids for g in gws}
+    cap = {(i, g): _lp.binary(prob, f"cap_{i}_{g}") for i in ids for g in gws}
+    buy = {(i, g): _lp.binary(prob, f"buy_{i}_{g}") for i in ids for g in gws}
+    sell = {(i, g): _lp.binary(prob, f"sell_{i}_{g}") for i in ids for g in gws}
+    hits = {g: _lp.new_var(prob, f"hits_{g}", low=0, cat="Integer") for g in gws}
 
     from fplagent.optimizers.objective import effective_value
 
@@ -186,8 +187,8 @@ def plan_transfers(current_squad: list[dict], candidate_pool: list[dict],
             prob += buy[(i, b)] + sell[(i, b)] <= 1
 
     # --- free transfer accumulation, capped at five ----------------------
-    ft = {g: pulp.LpVariable(f"ft_{g}", lowBound=0, upBound=MAX_BANKED_FREE_TRANSFERS,
-                             cat="Integer") for g in gws}
+    ft = {g: _lp.new_var(prob, f"ft_{g}", low=0, up=MAX_BANKED_FREE_TRANSFERS,
+                         cat="Integer") for g in gws}
     prob += ft[first] == min(free_transfers, MAX_BANKED_FREE_TRANSFERS)
     for g in gws:
         n_in = pulp.lpSum(buy[(i, g)] for i in ids)
@@ -210,14 +211,14 @@ def plan_transfers(current_squad: list[dict], candidate_pool: list[dict],
     # enough: the solver would set used=0 to carry a larger ft into next week
     # and get transfers for free. The lower bound n_in - hits pins it,
     # because n_in - max(0, n_in - ft) is exactly min(n_in, ft).
-    used = {g: pulp.LpVariable(f"used_{g}", lowBound=0,
-                               upBound=MAX_BANKED_FREE_TRANSFERS,
-                               cat="Integer") for g in gws}
+    used = {g: _lp.new_var(prob, f"used_{g}", low=0,
+                           up=MAX_BANKED_FREE_TRANSFERS,
+                           cat="Integer") for g in gws}
     for g in gws:
         prob += used[g] <= pulp.lpSum(buy[(i, g)] for i in ids)
         prob += used[g] <= ft[g]
         prob += used[g] >= pulp.lpSum(buy[(i, g)] for i in ids) - hits[g]
-    cap_hit = {b: pulp.LpVariable(f"ft_cap_{b}", cat="Binary")
+    cap_hit = {b: _lp.binary(prob, f"ft_cap_{b}")
                for _, b in zip(gws, gws[1:])}
     for a, b in zip(gws, gws[1:]):
         raw_next = ft[a] - used[a] + 1
@@ -229,8 +230,7 @@ def plan_transfers(current_squad: list[dict], candidate_pool: list[dict],
         prob += ft[b] >= raw_next - MAX_BANKED_FREE_TRANSFERS * cap_hit[b]
         prob += ft[b] >= MAX_BANKED_FREE_TRANSFERS * cap_hit[b]
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=time_limit))
-    status = pulp.LpStatus[prob.status]
+    status = _lp.solve(prob, time_limit)
     if status not in ("Optimal", "Not Solved"):
         return TransferPlan(status=f"solver: {status}")
     # A timeout with no incumbent leaves every variable at None, which the

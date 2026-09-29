@@ -5,7 +5,18 @@ pandas>=2.1
 SQLAlchemy>=2.0
 requests>=2.31
 python-dotenv>=1.0
+# PuLP 4.0 (Oct 2026) is a from-scratch rewrite on a Rust core: it removed
+# `LpVariable.dicts()`, changed the standalone `LpVariable(name, cat=...)`
+# constructor, dropped the bundled CBC solver, and replaced the int
+# `prob.status` / `pulp.LpStatus` API with an `LpSolveStatus` enum returned
+# from `solve()`. optimizers/_lp.py is a small compatibility layer that
+# every optimiser goes through, so squad.py, transfers.py and chips.py run
+# unchanged on either generation -- no upper bound needed here anymore.
 PuLP>=3.3.2
+# Only used when PuLP resolves to >=4.0, which has no bundled solver: 4.x's
+# default solver is HiGHS, shipped separately as highspy. Harmless and
+# unused on PuLP 3.x. If you deliberately stay on PuLP<4 you can drop this.
+highspy>=1.9
 
 # --- optional but recommended ---------------------------------------------
 scikit-learn>=1.3        # learned minutes model + isotonic calibration.

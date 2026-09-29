@@ -2,10 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import clsx from "clsx";
 import { BrowserApiError, getJSON, postJSON } from "@/lib/browserApi";
 import type { CompareResponse, DashboardPlayer, PredictionsPage } from "@/lib/types";
 import { EmptyState } from "@/components/ui";
 import { CompareHeader, CompareLensTabs, CompareSummaryCard, ComparisonGrid, ProfileBars, type CompareLens, lensMeta } from "@/components/CompareUI";
+import { CompareRadar } from "@/components/CompareRadar";
+import { DuelMatrix } from "@/components/DuelMatrix";
+import { DistributionOverlay } from "@/components/DistributionOverlay";
 import { money, pct, pts } from "@/lib/format";
 
 type Pairwise = {
@@ -32,6 +36,8 @@ export default function PlayerComparePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(true);
+  const [duelOpponentId, setDuelOpponentId] = useState<number | null>(null);
+  const [duelView, setDuelView] = useState<"single" | "matrix">("single");
 
   useEffect(() => {
     let initial: number[] = [];
@@ -41,8 +47,12 @@ export default function PlayerComparePage() {
     else {
       try { initial = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]").filter((x: unknown): x is number => typeof x === "number").slice(0, 8); } catch { initial = []; }
     }
+    // Reading the URL / localStorage must happen after mount (server render
+    // has neither), so this one-time setState-in-effect is intentional.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelected(initial);
-    if (initial.length) setAnchorId(initial[0]);
+    const firstInitial = initial[0];
+    if (firstInitial !== undefined) setAnchorId(firstInitial);
     getJSON<PredictionsPage & { players: DashboardPlayer[] }>("/predictions?limit=700&sort=xp_mean&desc=true")
       .then(r => setPool(r.players))
       .catch(e => setError(e instanceof BrowserApiError ? e.message : "Could not load the player pool."));
@@ -59,6 +69,13 @@ export default function PlayerComparePage() {
     ).slice(0, 30);
   }, [pool, query, position, maxPrice]);
 
+  // A finished duel is only shown while it still describes the current
+  // reference player and a player still in the comparison set. Deriving this
+  // (instead of resetting state in an effect) avoids a cascading re-render.
+  const duelOpponents = (data?.players ?? []).filter(p => p.player_id !== anchorId);
+  const effectiveOpponentId = duelOpponents.some(p => p.player_id === duelOpponentId) ? duelOpponentId : duelOpponents[0]?.player_id ?? null;
+  const visiblePairwise = pairwise && pairwise.player_a.player_id === anchorId && pairwise.player_b.player_id === effectiveOpponentId ? pairwise : null;
+
   const selectedPlayers = useMemo(() => pool.filter(p => selected.includes(p.player_id)), [pool, selected]);
 
   async function runComparison(ids = selected) {
@@ -67,7 +84,8 @@ export default function PlayerComparePage() {
     try {
       const result = await postJSON<CompareResponse>("/players/compare", { player_ids: ids });
       setData(result);
-      if (!ids.includes(anchorId)) setAnchorId(ids[0]);
+      const firstId = ids[0];
+      if (firstId !== undefined && !ids.includes(anchorId)) setAnchorId(firstId);
       setShowPicker(false);
     } catch (e) { setError(e instanceof BrowserApiError ? e.message : "Comparison failed."); }
     finally { setLoading(false); }
@@ -76,7 +94,8 @@ export default function PlayerComparePage() {
   function toggle(id: number) {
     setSelected(prev => {
       const next = prev.includes(id) ? prev.filter(x => x !== id) : prev.length < 8 ? [...prev, id] : prev;
-      if (next.length && !next.includes(anchorId)) setAnchorId(next[0]);
+      const firstNext = next[0];
+      if (firstNext !== undefined && !next.includes(anchorId)) setAnchorId(firstNext);
       return next;
     });
   }
@@ -84,8 +103,10 @@ export default function PlayerComparePage() {
   async function runPairwise() {
     const others = selectedPlayers.filter(p => p.player_id !== anchorId);
     if (!others.length || !anchorId) return;
+    const opponent = others.find(p => p.player_id === effectiveOpponentId) ?? others[0];
+    if (!opponent) return;
     try {
-      const result = await postJSON<Pairwise>("/compare/captaincy", { player_a_id: anchorId, player_b_id: others[0].player_id, same_team: anchorId === others[0].player_id ? false : anchorId != null && anchorId !== 0 && (data?.players.find(p => p.player_id === anchorId)?.team_id === others[0].team_id) });
+      const result = await postJSON<Pairwise>("/compare/captaincy", { player_a_id: anchorId, player_b_id: opponent.player_id, same_team: anchorId === opponent.player_id ? false : anchorId != null && anchorId !== 0 && (data?.players.find(p => p.player_id === anchorId)?.team_id === opponent.team_id) });
       setPairwise(result);
     } catch (e) { setError(e instanceof BrowserApiError ? e.message : "Could not calculate the head-to-head distribution."); }
   }
@@ -120,7 +141,7 @@ export default function PlayerComparePage() {
         <CompareLensTabs value={lens} onChange={setLens}/>
       </div>
 
-      <CompareHeader players={data.players} anchorId={anchorId} onAnchorChange={setAnchorId} onRemove={(id) => { const next = selected.filter(x => x !== id); setSelected(next); setData(next.length >= 2 ? data : null); if (next.length) setAnchorId(next[0]); }} />
+      <CompareHeader players={data.players} anchorId={anchorId} onAnchorChange={setAnchorId} onRemove={(id) => { const next = selected.filter(x => x !== id); setSelected(next); setData(next.length >= 2 ? data : null); const firstLeft = next[0]; if (firstLeft !== undefined) setAnchorId(firstLeft); }} />
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{data.players.map(p => <CompareSummaryCard key={p.player_id} p={p} lens={lens} anchorId={anchorId}/>)}</div>
 
@@ -129,9 +150,31 @@ export default function PlayerComparePage() {
         <section className="rounded-2xl border border-line bg-panel p-4"><div className="mb-4"><h2 className="text-sm font-semibold">Lens profile</h2><p className="mt-1 text-xs text-muted">Visualises the selected dimension only. It is not a universal ranking.</p></div><ProfileBars players={data.players} lens={lens}/></section>
       </div>
 
+      <div className="grid gap-4 xl:grid-cols-2">
+        <section className="rounded-2xl border border-line bg-panel p-4">
+          <div className="mb-4"><h2 className="text-sm font-semibold">Outcome distributions</h2><p className="mt-1 text-xs leading-5 text-muted">Every player&apos;s simulated points range on one shared axis. Overlap shows how close the calls really are; a wide block left of a narrow one is a floor versus ceiling trade-off.</p></div>
+          <DistributionOverlay players={data.players}/>
+        </section>
+        <section className="rounded-2xl border border-line bg-panel p-4">
+          <div className="mb-2"><h2 className="text-sm font-semibold">Profile shape</h2><p className="mt-1 text-xs leading-5 text-muted">Seven dimensions at once: output, floor, ceiling, minutes, value, ownership leverage and upcoming fixtures.</p></div>
+          <CompareRadar players={data.players}/>
+        </section>
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-2">
-        <section className="rounded-2xl border border-line bg-panel p-4"><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Pairwise outcome probability</h2><p className="mt-1 text-xs leading-5 text-muted">A direct simulation comparison between the reference player and another selected player.</p></div><button onClick={runPairwise} disabled={data.players.length < 2} className="rounded-lg border border-line bg-bg px-3 py-2 text-[10px] font-semibold hover:border-[var(--accent)]">Calculate duel</button></div>{pairwise ? <div className="mt-4 grid grid-cols-3 gap-2"><div className="rounded-xl bg-bg/60 p-3 text-center"><div className="text-[9px] text-muted">{pairwise.player_a.name}</div><div className="mt-1 font-mono text-xl font-semibold">{pct(pairwise.p_a_wins)}</div><div className="text-[9px] text-muted">outscores B</div></div><div className="rounded-xl bg-bg/60 p-3 text-center"><div className="text-[9px] text-muted">Tie</div><div className="mt-1 font-mono text-xl font-semibold">{pct(pairwise.p_tie)}</div><div className="text-[9px] text-muted">same simulated points</div></div><div className="rounded-xl bg-bg/60 p-3 text-center"><div className="text-[9px] text-muted">{pairwise.player_b.name}</div><div className="mt-1 font-mono text-xl font-semibold">{pct(pairwise.p_b_wins)}</div><div className="text-[9px] text-muted">outscores A</div></div></div> : <div className="mt-4 rounded-xl border border-dashed border-line p-6 text-center text-xs text-muted">Choose a reference player, then calculate the duel against the first other selected player.</div>}{pairwise?.note ? <div className="mt-3 text-[10px] text-muted">{pairwise.note}</div> : null}</section>
-        <section className="rounded-2xl border border-line bg-panel p-4"><h2 className="text-sm font-semibold">What this comparison should answer</h2><div className="mt-3 grid gap-2 text-xs"><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Output</div><div className="mt-1 text-muted">Who has the stronger mean/median projection?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Risk</div><div className="mt-1 text-muted">How much floor or minutes uncertainty are you accepting?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Economics</div><div className="mt-1 text-muted">How much projection are you buying for each £m?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Ownership</div><div className="mt-1 text-muted">How much upside remains after accounting for crowd exposure?</div></div></div><div className="mt-4"><Link href="/players" className="text-xs font-semibold text-[var(--accent)] hover:underline">Back to Player Lab →</Link></div></section>
+        <section className="rounded-2xl border border-line bg-panel p-4"><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Outcome probability</h2><p className="mt-1 text-xs leading-5 text-muted">{duelView === "single" ? "A direct simulation comparison between the reference player and another selected player." : "The reference player against every other selected player, all at once."}</p></div>
+            <div className="flex shrink-0 gap-1 rounded-lg border border-line bg-bg p-0.5 text-[9px] font-semibold">
+              <button onClick={() => setDuelView("single")} className={clsx("rounded-md px-2 py-1", duelView === "single" ? "bg-[var(--accent)] text-white" : "text-muted")}>1-on-1</button>
+              <button onClick={() => setDuelView("matrix")} className={clsx("rounded-md px-2 py-1", duelView === "matrix" ? "bg-[var(--accent)] text-white" : "text-muted")}>Matrix</button>
+            </div>
+          </div>
+          {duelView === "single" ? <>{data.players.length > 2 ? <div className="mt-3 flex items-center gap-2"><label className="text-[10px] text-muted">Opponent</label><select value={effectiveOpponentId ?? ""} onChange={e => setDuelOpponentId(e.target.value ? Number(e.target.value) : null)} className="rounded-lg border border-line bg-bg px-2 py-1.5 text-xs outline-none focus:border-[var(--accent)]">{duelOpponents.map(p => <option key={p.player_id} value={p.player_id}>{p.web_name}</option>)}</select><button onClick={runPairwise} disabled={data.players.length < 2} className="ml-auto rounded-lg border border-line bg-bg px-3 py-2 text-[10px] font-semibold hover:border-[var(--accent)]">Calculate duel</button></div> : <div className="mt-3"><button onClick={runPairwise} disabled={data.players.length < 2} className="rounded-lg border border-line bg-bg px-3 py-2 text-[10px] font-semibold hover:border-[var(--accent)]">Calculate duel</button></div>}
+          {visiblePairwise ? <div className="mt-4 grid grid-cols-3 gap-2"><div className="rounded-xl bg-bg/60 p-3 text-center"><div className="text-[9px] text-muted">{visiblePairwise.player_a.name}</div><div className="mt-1 font-mono text-xl font-semibold">{pct(visiblePairwise.p_a_wins)}</div><div className="text-[9px] text-muted">outscores B</div></div><div className="rounded-xl bg-bg/60 p-3 text-center"><div className="text-[9px] text-muted">Tie</div><div className="mt-1 font-mono text-xl font-semibold">{pct(visiblePairwise.p_tie)}</div><div className="text-[9px] text-muted">same simulated points</div></div><div className="rounded-xl bg-bg/60 p-3 text-center"><div className="text-[9px] text-muted">{visiblePairwise.player_b.name}</div><div className="mt-1 font-mono text-xl font-semibold">{pct(visiblePairwise.p_b_wins)}</div><div className="text-[9px] text-muted">outscores A</div></div></div> : <div className="mt-4 rounded-xl border border-dashed border-line p-6 text-center text-xs text-muted">Choose a reference player{data.players.length > 2 ? " and an opponent" : ""}, then calculate the duel.</div>}{visiblePairwise?.note ? <div className="mt-3 text-[10px] text-muted">{visiblePairwise.note}</div> : null}</> : (
+            <div className="mt-3">
+              {(() => { const a = data.players.find(p => p.player_id === anchorId) ?? data.players[0]; return a ? <DuelMatrix anchor={a} opponents={data.players.filter(p => p.player_id !== anchorId)} season={data.season}/> : null; })()}
+            </div>
+          )}</section>
+        <section className="rounded-2xl border border-line bg-panel p-4"><h2 className="text-sm font-semibold">What this comparison should answer</h2><div className="mt-3 grid gap-2 text-xs"><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Output</div><div className="mt-1 text-muted">Who has the stronger mean/median projection?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Risk</div><div className="mt-1 text-muted">How much floor or minutes uncertainty are you accepting?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Economics</div><div className="mt-1 text-muted">How much projection are you buying for each £m?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Fixtures</div><div className="mt-1 text-muted">Is the next run easier for this player&apos;s position, or does a hard week sit inside it?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Warnings</div><div className="mt-1 text-muted">Does the model itself flag this projection as fragile or unstable?</div></div><div className="rounded-xl border border-line bg-bg/60 p-3"><div className="font-semibold">Ownership</div><div className="mt-1 text-muted">How much upside remains after accounting for crowd exposure?</div></div></div><div className="mt-4"><Link href="/players" className="text-xs font-semibold text-[var(--accent)] hover:underline">Back to Player Lab →</Link></div></section>
       </div>
     </> : <div className="rounded-2xl border border-dashed border-line bg-panel p-10 text-center"><div className="text-sm font-semibold">Select at least two players</div><p className="mx-auto mt-2 max-w-xl text-xs leading-6 text-muted">The comparison desk becomes fully interactive once you select two or more players. Select up to eight for a wider research set.</p></div>}
   </div>;

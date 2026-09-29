@@ -3,7 +3,7 @@ import { dashboardOverview, evaluationLatest } from "@/lib/api";
 import { EmptyState } from "@/components/ui";
 import { Kpi, MetricPill, PlayerStrip } from "@/components/DashboardBits";
 import { TeamStrengthBars } from "@/components/Viz";
-import { pct, pts } from "@/lib/format";
+import { pts } from "@/lib/format";
 import type { DashboardOverview, EvaluationRun } from "@/lib/types";
 
 export const dynamic = "force-dynamic";

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 
 from fplagent.config import FIRST_HALF_LAST_GW, TOTAL_GWS
+from fplagent.optimizers import _lp
 
 CHIPS = ("wildcard", "free_hit", "bench_boost", "triple_captain")
 
@@ -69,7 +70,7 @@ def schedule_chips(chip_value_by_gw: dict[str, dict[int, float]],
     second_half = [g for g in gws if g > first_half_last_gw]
 
     prob = pulp.LpProblem("chips", pulp.LpMaximize)
-    x: dict[tuple[str, str, int], pulp.LpVariable] = {}
+    x: dict[tuple[str, str, int], object] = {}
     for chip in CHIPS:
         for half, window in (("first", first_half), ("second", second_half)):
             if used.get(chip) and any(
@@ -79,7 +80,7 @@ def schedule_chips(chip_value_by_gw: dict[str, dict[int, float]],
             for g in window:
                 if chip == "free_hit" and g == 1:
                     continue                   # Free Hit is not allowed in GW1
-                x[(chip, half, g)] = pulp.LpVariable(f"x_{chip}_{half}_{g}", cat="Binary")
+                x[(chip, half, g)] = _lp.binary(prob, f"x_{chip}_{half}_{g}")
 
     if not x:
         return ChipSchedule(status="no chips remaining")
@@ -107,7 +108,7 @@ def schedule_chips(chip_value_by_gw: dict[str, dict[int, float]],
     if fh19 and fh20:
         prob += pulp.lpSum(x[k] for k in fh19) + pulp.lpSum(x[k] for k in fh20) <= 1
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    status = _lp.solve(prob)
 
     assignments: dict[str, dict[str, int | None]] = {
         c: {"first": None, "second": None} for c in CHIPS}
@@ -131,7 +132,7 @@ def schedule_chips(chip_value_by_gw: dict[str, dict[int, float]],
     return ChipSchedule(
         assignments=assignments,
         total_value=float(pulp.value(prob.objective) or 0.0),
-        status=pulp.LpStatus[prob.status], notes=notes,
+        status=status, notes=notes,
     )
 
 

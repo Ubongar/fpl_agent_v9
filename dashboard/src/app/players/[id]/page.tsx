@@ -4,6 +4,7 @@ import { ComponentWaterfall } from "@/components/ComponentWaterfall";
 import { DistributionViz } from "@/components/Viz";
 import { EmptyState, Panel, Stat } from "@/components/ui";
 import { pct, pts } from "@/lib/format";
+import type { PlayerDetail } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +12,7 @@ export default async function PlayerXray({ params }: { params: Promise<{ id: str
   const { id } = await params;
   const playerId = Number(id);
   if (!Number.isInteger(playerId) || playerId <= 0) return <EmptyState title="Invalid player" detail="The player identifier is not valid." />;
-  let data: any = null;
+  let data: PlayerDetail | null = null;
   let error: string | null = null;
   try { data = await playerDetail(playerId); } catch (e) { error = e instanceof Error ? e.message : "Player projection unavailable."; }
   if (!data) return <EmptyState title="Player projection unavailable" detail={error ?? "No stored prediction for this player."} command="fplagent predict" />;
@@ -52,7 +53,7 @@ export default async function PlayerXray({ params }: { params: Promise<{ id: str
         <Panel title="Scoring decomposition" subtitle="Expected contribution by FPL scoring mechanism. Negative bars are downside sources."><ComponentWaterfall components={data.components ?? {}} /></Panel>
       </div>
       <div className="grid gap-4 lg:grid-cols-3">
-        <Panel title="Consistency flags"><div className="space-y-2">{(data.flags ?? []).length ? data.flags.map((f: any) => <div key={f.code} className="rounded-xl border border-[var(--warn)]/30 bg-[var(--warn)]/10 p-3 text-xs"><div className="font-semibold text-[var(--warn)]">{f.code}</div><div className="mt-1 text-muted">{f.message}</div></div>) : <div className="rounded-xl border border-[var(--good)]/25 bg-[var(--good)]/10 p-3 text-xs text-[var(--good)]">No deterministic consistency flags for this projection.</div>}</div></Panel>
+        <Panel title="Consistency flags"><div className="space-y-2">{(data.flags ?? []).length ? (data.flags ?? []).map((f) => <div key={f.code} className="rounded-xl border border-[var(--warn)]/30 bg-[var(--warn)]/10 p-3 text-xs"><div className="font-semibold text-[var(--warn)]">{f.code}</div><div className="mt-1 text-muted">{f.message}</div></div>) : <div className="rounded-xl border border-[var(--good)]/25 bg-[var(--good)]/10 p-3 text-xs text-[var(--good)]">No deterministic consistency flags for this projection.</div>}</div></Panel>
         <Panel title="Model inputs"><div className="max-h-80 overflow-auto rounded-xl border border-line bg-bg p-3"><pre className="whitespace-pre-wrap text-[10px] leading-5 text-muted">{JSON.stringify(data.inputs, null, 2)}</pre></div></Panel>
         <Panel title="Projection freshness"><div className="space-y-3 text-sm"><div><div className="text-xs text-muted">Created</div><div className="mt-1 font-mono">{data.freshness?.age_hours != null ? `${data.freshness.age_hours}h ago` : "Unknown"}</div></div><div className="text-xs leading-5 text-muted">{data.freshness?.note ?? "Freshness metadata unavailable."}</div><div className="rounded-xl border border-line p-3 text-xs">Stored rows remain immutable for evaluation; live news overlays do not rewrite the historical prediction.</div></div></Panel>
       </div>

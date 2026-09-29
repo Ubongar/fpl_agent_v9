@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ModelLab() {
   let data: Awaited<ReturnType<typeof modelDashboard>> | null = null;
-  let latest: any = null;
+  let latest: Awaited<ReturnType<typeof evaluationLatest>> | null = null;
   let error: string | null = null;
   try { data = await modelDashboard(); try { latest = await evaluationLatest(); } catch {} } catch(e){ error = e instanceof Error ? e.message : "Could not load model diagnostics."; }
   if (!data) return <EmptyState title="Model Lab unavailable" detail={error ?? "No diagnostics available."} command="fplagent evaluate --from 2 --to 8" />;
