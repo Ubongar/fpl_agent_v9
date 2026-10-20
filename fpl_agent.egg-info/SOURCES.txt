@@ -55,7 +55,9 @@ fplagent/models/shares.py
 fplagent/models/simulation.py
 fplagent/models/team_strength.py
 fplagent/optimizers/__init__.py
+fplagent/optimizers/_lp.py
 fplagent/optimizers/captaincy.py
+fplagent/optimizers/chip_values.py
 fplagent/optimizers/chips.py
 fplagent/optimizers/objective.py
 fplagent/optimizers/squad.py
@@ -67,6 +69,7 @@ fplagent/pipeline/run.py
 tests/test_bonus_and_defcon.py
 tests/test_db_and_pipeline.py
 tests/test_fbref_csv.py
+tests/test_lp_optimizers.py
 tests/test_manager_team.py
 tests/test_optimizers.py
 tests/test_scoring.py
@@ -74,5 +77,6 @@ tests/test_simulation.py
 tests/test_v7_2_fixes.py
 tests/test_v7_regressions.py
 tests/test_v8_regressions.py
+tests/test_v9_compare_payload.py
 tests/test_v9_decision.py
 tests/test_v9_decision_layer.py

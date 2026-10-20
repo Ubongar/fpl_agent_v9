@@ -24,63 +24,23 @@ receives genuine open-play numbers.
 WHAT CHANGED IN v9
 ------------------
 1. A SINGLE HIGH-SCORING FIXTURE NO LONGER CONTRIBUTES ITS FULL WEIGHT.
-
-   The shrinkage weight w = minutes / (minutes + k) treats the player's TOTAL
-   non-penalty goals as if each goal were equally informative. That is wrong
-   when a player's season is concentrated in one game: a forward who scored
-   3-4 in one match and nothing in the surrounding four has a small sample
-   whose entire signal is a single observation.
-
    The robust fix is to cap each fixture's contribution to the numerator at
    MAX_GOALS_PER_FIXTURE_FOR_SHARE (2.0). This is a standard winsorising step
-   for heavy-tailed count data and is defensible on its own terms -- one
-   game cannot outweigh five -- but the effect is material here: measured on
-   an early-season forward whose 4-goal haul against a strong side otherwise
-   dominated his share estimate, capping at 2 brings the blended share from
-   ~0.40 down to ~0.30, closer to what a mid-table striker's base rate
-   supports. The cap is applied to the NUMERATOR only. The denominator (team
-   non-penalty goals over the same fixtures) is left un-capped because a team
-   scoring 4 in one match is not an outlier the way an individual 4-goal haul
-   is; team goals are far less concentrated.
-
+   for heavy-tailed count data.
 2. THE FUNCTION IS METRIC-AGNOSTIC: GOALS OR xG.
-
-   `metric` names what the caller is passing in the "goals" arguments.
-   When set to "xg", the same ratio arithmetic is applied to expected goals
-   instead of actual goals. xG is a less noisy estimator of a player's
-   underlying attacking involvement -- a striker whose two goals in five
-   games came from 0.15 xG per match is a worse finisher than a striker
-   whose one goal came from 0.8 xG -- and using it removes the finishing
-   luck component from the share estimate. It is a strict improvement for
-   everyone whose goal counts misrepresent their underlying quality, but
-   it does NOT help a player whose one big game was legitimately high xG
-   (a genuine hat-trick of good chances): for that case, only the
-   per-fixture cap above is effective. The two fixes complement each other.
-
-   Priors are unchanged between metrics: over a large sample, the
-   distribution of goal share and xG share at a given position are close
-   enough that the same GOAL_SHARE_PRIOR values are a defensible prior for
-   both. The alternative -- calibrating separate xG priors -- would require
-   a season of data we do not yet have.
 
 THREE OTHER CORRECTIONS
 -----------------------
 1. ASSISTS ARE NO LONGER DIVIDED BY GOALS.
-   v6 computed `raw_a = player_assists / denom_goals`. Only about 75% of
-   goals are assisted, so the resulting share sat on a different scale from
-   the one the simulator consumes and was biased low by roughly a quarter.
-
 2. SHARES ARE RESOLVED AGAINST THE PITCH, NOT JUST CLIPPED.
-   `normalise_shares` only scaled down when the total exceeded one. The
-   simulator now renormalises per simulation draw against the eleven actually
-   playing, which is the only place the question can be answered.
-
 3. THE PENALTY POSTERIOR IS NO LONGER THE PRIMARY SOURCE.
-   v6 inferred duty from observed penalties. A team awarded no penalties had
-   `pens_team == 0`, the posterior returned 0.0, and the model concluded
-   nobody at that club takes them. Declared duty from `bootstrap-static` is
-   now primary (see `setpieces.py`); the observational posterior is kept as a
-   cross-check that can flag a duty changing hands.
+
+WHAT CHANGED IN v10
+-------------------
+External API Blending: The function now accepts per-90 baselines from
+external APIs (like StrikerAPI) and blends them with the player's historical
+data. This prevents the model from overreacting to short-term FPL luck when
+underlying metrics (xG/xA) suggest a different true talent level.
 """
 from __future__ import annotations
 
@@ -104,12 +64,7 @@ ASSISTED_RATE = 0.75
 PENALTY_GOAL_RATE = 0.105
 PENALTY_CONVERSION = 0.79
 
-# Robust cap on the per-fixture numerator. A player who scores 3 in one game
-# is genuinely better than one who scores 2, but the difference should not be
-# able to outweigh an entire season of counter-evidence. Two goals is a
-# natural breakpoint: it is roughly the 99th percentile of individual
-# per-fixture goal counts in the Premier League, so anything above it is by
-# definition an outlier observation.
+# Robust cap on the per-fixture numerator.
 MAX_GOALS_PER_FIXTURE_FOR_SHARE = 2.0
 
 
@@ -133,25 +88,15 @@ def estimate_shares(position: str,
                     player_pens_taken: list[float] | None = None,
                     team_pens: list[float] | None = None,
                     prior_override: dict | None = None,
-                    metric: str = "goals") -> ShareEstimate:
-    """All lists aligned, one entry per fixture the player's team played.
+                    metric: str = "goals",
+                    player_expected_assists: list[float] | None = None,
+                    team_expected_assists: list[float] | None = None,
+                    xa_blend_weight: float = 0.65,
+                    baseline_npxg90: float = 0.0,
+                    baseline_xa90: float = 0.0,
+                    blend_weight: float = 0.5) -> ShareEstimate:
+    """All lists aligned, one entry per fixture the player's team played."""
 
-    `player_np_goals` must be NON-PENALTY events. The caller is responsible
-    for subtracting estimated penalty contributions (goals or xG depending
-    on `metric`); passing raw `goals_scored` here is the v6 bug.
-
-    `metric` names what the numbers are. The arithmetic is identical either
-    way; this only affects logging and the emitted provenance, so a reader
-    can tell whether a share was computed from goals or xG. See the module
-    docstring for why xG is the better numerator.
-
-    The denominator is the team's output WHILE THE PLAYER WAS ON THE PITCH,
-    prorated by minutes, so a share reflects a player's rate when playing
-    rather than one diluted by matches he sat out.
-
-    Individual fixtures are capped at MAX_GOALS_PER_FIXTURE_FOR_SHARE in the
-    numerator. See the module docstring for why.
-    """
     prior_g = (prior_override or {}).get("np_goal_share", GOAL_SHARE_PRIOR.get(position, 0.08))
     prior_a = (prior_override or {}).get("assist_share", ASSIST_SHARE_PRIOR.get(position, 0.10))
     conf_seed = (prior_override or {}).get("confidence", "prior_only")
@@ -167,27 +112,30 @@ def estimate_shares(position: str,
     team_np = np.array(team_np_goals, dtype=float)
     denom_goals = float((team_np * on_pitch).sum())
 
-    # Assists get their own denominator. If the caller has real team assist
-    # counts, use them; otherwise fall back to goals scaled by the assisted
-    # rate, which is the correct conversion between the two scales.
     if team_assists:
         team_as = np.array(team_assists, dtype=float)
         denom_assists = float((team_as * on_pitch).sum())
     else:
         denom_assists = denom_goals * ASSISTED_RATE
 
-    # Robust numerator: cap each individual fixture's contribution. The sum
-    # is what feeds the share ratio, so capping one very high game prevents
-    # it from dominating every other observation the player has.
     player_np_raw = np.array(player_np_goals, dtype=float)
     player_np_capped = np.minimum(player_np_raw, MAX_GOALS_PER_FIXTURE_FOR_SHARE)
     player_np = float(player_np_capped.sum())
 
-    # Assists are less heavy-tailed than goals (a "hat-trick of assists" is
-    # much rarer than a goal hat-trick) but the same principle applies; cap
-    # at 2 to be consistent.
     player_as_raw = np.array(player_assists, dtype=float)
     player_as = float(np.minimum(player_as_raw, MAX_GOALS_PER_FIXTURE_FOR_SHARE).sum())
+
+    # --- EXTERNAL API BLENDING (v10) ---
+    api_blend_used = 0.0
+    if baseline_npxg90 > 0 and minutes_equiv > 0:
+        api_expected_goals = baseline_npxg90 * minutes_equiv
+        player_np = (player_np * (1.0 - blend_weight)) + (api_expected_goals * blend_weight)
+        api_blend_used = blend_weight
+
+    if baseline_xa90 > 0 and minutes_equiv > 0:
+        api_expected_assists = baseline_xa90 * minutes_equiv
+        player_as = (player_as * (1.0 - blend_weight)) + (api_expected_assists * blend_weight)
+    # -----------------------------------
 
     k = PARAMS.share_shrinkage_games
     w = minutes_equiv / (minutes_equiv + k)
@@ -200,12 +148,27 @@ def estimate_shares(position: str,
         conf = "data_driven" if minutes_equiv >= 2 * k else "shrunk"
 
     if denom_assists <= 0:
-        assist_share = prior_a
+        observed_assist_share = prior_a
     else:
-        assist_share = w * (player_as / denom_assists) + (1 - w) * prior_a
+        observed_assist_share = w * (player_as / denom_assists) + (1 - w) * prior_a
 
-    # Declared duty wins. The observational posterior below exists only to
-    # disagree with it out loud, never to override it silently.
+    assist_share = observed_assist_share
+    xa_share = None
+    xa_weight_used = 0.0
+    if player_expected_assists is not None and team_expected_assists is not None:
+        player_xa = np.asarray(player_expected_assists, dtype=float)
+        team_xa = np.asarray(team_expected_assists, dtype=float)
+        if (len(player_xa) == len(mins) and len(team_xa) == len(mins)
+                and np.isfinite(player_xa).any() and np.isfinite(team_xa).any()):
+            player_xa = np.nan_to_num(player_xa, nan=0.0, posinf=0.0, neginf=0.0)
+            team_xa = np.nan_to_num(team_xa, nan=0.0, posinf=0.0, neginf=0.0)
+            denom_xa = float((team_xa * on_pitch).sum())
+            if denom_xa > 1e-8:
+                xa_share = w * (float(player_xa.sum()) / denom_xa) + (1 - w) * prior_a
+                xa_weight_used = float(np.clip(xa_blend_weight, 0.0, 1.0))
+                assist_share = ((1.0 - xa_weight_used) * observed_assist_share
+                                + xa_weight_used * xa_share)
+
     observed_pen_share = None
     if player_pens_taken is not None and team_pens is not None:
         pens_team = float(np.array(team_pens, dtype=float).sum())
@@ -224,8 +187,14 @@ def estimate_shares(position: str,
         "raw_player_goals": round(float(player_np_raw.sum()), 2),
         "capped_player_goals": round(player_np, 2),
         "per_fixture_cap": MAX_GOALS_PER_FIXTURE_FOR_SHARE,
+        "observed_assist_share": round(float(observed_assist_share), 4),
+        "xa_share": None if xa_share is None else round(float(xa_share), 4),
+        "xa_blend_weight_used": round(float(xa_weight_used), 3),
         "penalty_source": ("declared" if declared_penalty_share is not None
                            else ("observed" if observed_pen_share else "none")),
+        "api_npxg90": baseline_npxg90,
+        "api_xa90": baseline_xa90,
+        "api_blend_weight_used": round(api_blend_used, 3),
     }
     if declared_penalty_share is not None and observed_pen_share is not None:
         prov["observed_penalty_share"] = round(observed_pen_share, 3)
@@ -243,12 +212,7 @@ def estimate_shares(position: str,
 
 
 def normalise_shares(shares: np.ndarray, cap: float = 0.85) -> np.ndarray:
-    """Scale a team's shares so they sum to at most 1.
-
-    Kept for the static case. The simulator prefers `resolve_on_pitch_shares`
-    below, which does the same job per simulation draw against the players
-    actually playing.
-    """
+    """Scale a team's shares so they sum to at most 1."""
     shares = np.clip(np.asarray(shares, dtype=float), 0.0, cap)
     total = shares.sum()
     if total <= 1.0:
@@ -258,21 +222,7 @@ def normalise_shares(shares: np.ndarray, cap: float = 0.85) -> np.ndarray:
 
 def resolve_on_pitch_shares(shares: np.ndarray, on_pitch: np.ndarray,
                             absorb_remainder: bool = False) -> np.ndarray:
-    """Per-draw shares over the players actually on the pitch.
-
-    shares:   (n_players,) static share estimates.
-    on_pitch: (n_players, n_sims) boolean.
-
-    With `absorb_remainder=False` the columns sum to at most 1 and the
-    shortfall means "a player outside our pool did it", which is correct for
-    open-play goals: a sixteen-man view is not the whole squad, and own goals
-    exist.
-
-    With `absorb_remainder=True` the columns are renormalised to sum to 1
-    among whoever is on. That is correct for a set piece whose taker is known
-    to be on the pitch, and it is the mechanism that makes a backup penalty
-    taker worth more when the primary is rested.
-    """
+    """Per-draw shares over the players actually on the pitch."""
     shares = np.asarray(shares, dtype=float)[:, None]
     avail = np.asarray(on_pitch, dtype=float) * shares
     col = avail.sum(axis=0)

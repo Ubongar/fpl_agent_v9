@@ -12,12 +12,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pandas as pd
 import numpy as np
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -183,6 +185,33 @@ def _captain_candidates(df, real_eo: dict[int, float], n: int = 50) -> list[dict
 
 
 @app.get("/health", tags=["system"])
+def run_pipeline_task():
+    """Runs the full ingestion and prediction pipeline in the background."""
+    log.info("Starting background FPL pipeline run...")
+    try:
+        # We use sys.executable to ensure it uses the exact same .venv that FastAPI is running in
+        result = subprocess.run(
+            [sys.executable, "-m", "fplagent.cli", "run", "--fbref-csv", "data/fbref_snapshots"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        log.info("Pipeline finished successfully.")
+    except subprocess.CalledProcessError as e:
+        log.error("Pipeline failed with exit code %d. Error: %s", e.returncode, e.stderr)
+    except Exception as e:
+        log.error("Failed to run pipeline: %s", e)
+
+
+@app.post("/sync-data", tags=["system"])
+async def trigger_sync(background_tasks: BackgroundTasks):
+    """Trigger a full model pipeline run from the web interface."""
+    background_tasks.add_task(run_pipeline_task)
+    return {
+        "status": "success", 
+        "message": "Pipeline started in the background. It will take about 7 minutes."
+    }
+    
 def health():
     from fplagent.db.session import session_scope
     from sqlalchemy import text

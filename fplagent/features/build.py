@@ -1,56 +1,4 @@
-"""Point-in-time feature construction.
-
-EVERY function here takes a `cutoff` datetime and is forbidden from looking at
-anything recorded after it. That discipline is what separates an honest
-walk-forward backtest from a model that has quietly read tomorrow's paper.
-
-It is also the discipline v6 broke without noticing, not here but in the
-persistence layer: `known_at` was refreshed on every upsert, so a re-ingest
-stamped every historical row with today's date and this module's `known_at <
-cutoff` filter returned nothing. See `db/repository.FIRST_WRITE_WINS`.
-
-THE OTHER v6 FAULTS FIXED HERE
-------------------------------
-* The team-goals merge joined on `fixture_id` alone against a frame holding
-  two rows per fixture, then filtered. When a counterpart row was missing the
-  filter dropped it, the length check failed, and a silent fallback set the
-  team-goals denominator to the PLAYER'S OWN GOALS, giving him a share of
-  exactly 1.0. It is now a composite join that cannot mismatch, reading the
-  scoreline from `fixtures` rather than reconstructing it from player rows.
-* `player_np_goals` was fed raw `goals_scored`. Non-penalty goals are now
-  reconstructed from declared duty and team penalty events.
-* The learned minutes model was never called. It is wired here, with a
-  matching feature vector on both the training and serving side.
-* Suspension was detected by summing yellows over a 12-match window against
-  season thresholds of 5, 10 and 15. It now reads the season total.
-* Price came from `players.now_cost`, the CURRENT price, which leaks into any
-  backtest because price rises follow performance. It now comes from the
-  point-in-time snapshot.
-
-CONGESTION FEATURE USES FIXTURE-DERIVED TEAM ID (v9)
-----------------------------------------------------
-`team_matches_last_14d` in the minutes model's training set was constant (a
-NaN column, which sklearn then dropped) for every row. The cause was
-`build_minutes_training_set` reading the target's team_id from a
-point-in-time snapshot: `_snapshot_before(pid, target_ko)` returns nothing
-when no snapshot was pulled before that fixture's kickoff, which is the case
-for essentially every historical training row on a freshly-deployed system.
-The team_id is now derived from the target fixture itself -- a player's team
-is whichever side of the fixture he appears on -- which is point-in-time
-accurate by construction and needs no snapshot.
-
-AND THE DOUBTFUL-PLAYER FLOOR
------------------------------
-FPL's own `chance_of_playing_next_round` is a direct statement from the
-source: 50 means the manager himself thinks this player is 50% likely to be
-involved. A calibrated model is free to disagree with that number in either
-direction, but a model that outputs exactly 0 for such a player is (a)
-contradicting the source it was given, and (b) breaking the lineup sampler,
-which cannot build a legal formation if an entire position group has zero
-starting weight. The floor applied here is deliberately low -- half the
-published chance -- so the model still has plenty of room to be pessimistic,
-but the sampler always has something positive to work with.
-"""
+"""Point-in-time feature construction."""
 from __future__ import annotations
 
 import logging
@@ -72,11 +20,11 @@ from fplagent.models.minutes import (
     FEATURE_ORDER, UNAVAILABLE, MinutesModel, heuristic_minutes,
 )
 from fplagent.models.shares import estimate_shares
+from fplagent.ingestion.external_apis import load_external_metrics
 
 log = logging.getLogger(__name__)
 
 YELLOW_BAN_THRESHOLDS = ((5, 19), (10, 32), (15, 38))
-
 PENALTY_XG_PER_ATTEMPT = 0.79
 
 
@@ -91,32 +39,11 @@ def load_history(cutoff: datetime, season: int = CURRENT_SEASON) -> pd.DataFrame
 
 
 def load_fixtures(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """Current-season fixtures only. Unchanged interface; use
-    `load_fixtures_with_history` if you need prior seasons for the fit."""
     return read_sql(select(T.fixtures).where(T.fixtures.c.season == season))
 
 
 def load_fixtures_with_history(season: int = CURRENT_SEASON,
                                n_prior: int | None = None) -> pd.DataFrame:
-    """Current-season fixtures plus prior-season fixtures, in the same shape.
-
-    Prior-season rows come from `historical_fixtures` (populated by
-    `scripts/backfill_history.py`) and are keyed on the persistent team
-    `code`. This function:
-      1. reads those rows for the prior N seasons,
-      2. maps their `home_team_code` / `away_team_code` onto the CURRENT
-         season's `team_id`s via `teams.code`,
-      3. drops any fixture whose club has no current team_id (relegated),
-      4. returns a frame with the same columns as `load_fixtures`.
-
-    Fixture ids are sourced from the original per-season id and can collide
-    across seasons; the caller must key on (season, fixture_id) if it needs
-    a unique row identity. `team_match_results` reads only goals and dates,
-    so this is not a problem in practice.
-
-    Returns the current-season fixtures unchanged if the backfill has not
-    been run, so this is always safe to call.
-    """
     current = load_fixtures(season)
     n_prior = PARAMS.prior_seasons_to_include if n_prior is None else n_prior
     if n_prior <= 0:
@@ -168,7 +95,6 @@ def load_players(season: int = CURRENT_SEASON) -> pd.DataFrame:
 
 
 def load_latest_status(cutoff: datetime, season: int = CURRENT_SEASON) -> pd.DataFrame:
-    """Most recent availability snapshot taken BEFORE the cutoff."""
     stmt = select(T.player_season_snapshots).where(
         (T.player_season_snapshots.c.season == season)
         & (T.player_season_snapshots.c.pulled_at < cutoff))
@@ -186,7 +112,7 @@ def _load_other_competition_fixtures(season: int, cutoff: datetime | None = None
             conds.extend([T.other_competition_fixtures.c.known_at < cutoff,
                           T.other_competition_fixtures.c.kickoff < cutoff])
         df = read_sql(select(T.other_competition_fixtures).where(*conds))
-    except Exception:      # noqa: BLE001
+    except Exception:
         return pd.DataFrame(columns=["team_id", "kickoff"])
     return df
 
@@ -237,10 +163,9 @@ def team_match_results(fixtures: pd.DataFrame, cutoff_gw: int,
                        current_season: int | None = None,
                        prior_season_age_multiplier: float | None = None
                        ) -> list[tuple[int, int, int, int, float]]:
-    """(home, away, hg, ag, days_ago) for every finished match known by `as_of`."""
     if fixtures.empty:
         return []
-    done = fixtures[(fixtures["finished"] == True) &                  # noqa: E712
+    done = fixtures[(fixtures["finished"] == True) &
                     fixtures["home_goals"].notna()]
     if done.empty:
         return []
@@ -275,7 +200,6 @@ def team_match_results(fixtures: pd.DataFrame, cutoff_gw: int,
 
 def team_match_xg(history: pd.DataFrame, fixtures: pd.DataFrame,
                   cutoff_gw: int) -> list[tuple[int, int, float, float, float]]:
-    """(home, away, home_xg, away_xg, 0.0) aggregated from player xG."""
     if history.empty or fixtures.empty:
         return []
     h = history[history["expected_goals"].notna()
@@ -286,9 +210,9 @@ def team_match_xg(history: pd.DataFrame, fixtures: pd.DataFrame,
              .sum())
     fx = fixtures[fixtures["gw"] < cutoff_gw][
         ["fixture_id", "home_team_id", "away_team_id"]]
-    home = agg[agg["was_home"] == True].rename(   # noqa: E712
+    home = agg[agg["was_home"] == True].rename(
         columns={"expected_goals": "home_xg"})[["fixture_id", "home_xg"]]
-    away = agg[agg["was_home"] == False].rename(  # noqa: E712
+    away = agg[agg["was_home"] == False].rename(
         columns={"expected_goals": "away_xg"})[["fixture_id", "away_xg"]]
     m = fx.merge(home, on="fixture_id", how="inner").merge(
         away, on="fixture_id", how="inner")
@@ -340,6 +264,19 @@ def _team_output_xg_by_fixture(history: pd.DataFrame) -> pd.DataFrame:
     return g[cols]
 
 
+def _team_output_xa_by_fixture(history: pd.DataFrame) -> pd.DataFrame:
+    keys = ["season", "fixture_id", "was_home"]
+    cols = keys + ["team_xa"]
+    if history.empty or "expected_assists" not in history:
+        return pd.DataFrame(columns=cols)
+    h = history[history["expected_assists"].notna()]
+    if h.empty:
+        return pd.DataFrame(columns=cols)
+    g = (h.groupby(keys, as_index=False)["expected_assists"].sum()
+          .rename(columns={"expected_assists": "team_xa"}))
+    return g[cols]
+
+
 def _team_penalties_by_fixture(history: pd.DataFrame) -> pd.DataFrame:
     keys = ["season", "fixture_id", "was_home"]
     cols = keys + ["team_pens_missed", "team_pens_est"]
@@ -381,7 +318,15 @@ def _apply_doubtful_floor(mp, status_code: str, chance: float | None,
 def build_player_features(cutoff: datetime, target_gw: int,
                           season: int = CURRENT_SEASON,
                           lookback: int = 12,
-                          minutes_model: MinutesModel | None = None) -> pd.DataFrame:
+                          minutes_model: MinutesModel | None = None,
+                          strict_point_in_time: bool = False) -> pd.DataFrame:
+    # 1. Load external API cache
+    external_metrics = load_external_metrics()
+    elo_data = external_metrics.get("elo", {})
+    per90_data = external_metrics.get("player_per90", {})
+    team_set_pieces = external_metrics.get("team_set_pieces", {})
+    match_predictions = external_metrics.get("match_predictions", {})
+
     players = load_players(season)
     if players.empty:
         return pd.DataFrame()
@@ -391,6 +336,7 @@ def build_player_features(cutoff: datetime, target_gw: int,
     fixtures = load_fixtures(season)
     team_out = _team_output_by_fixture(history, fixtures)
     team_xg_out = _team_output_xg_by_fixture(history)
+    team_xa_out = _team_output_xa_by_fixture(history)
     team_pens = _team_penalties_by_fixture(history)
     duties = load_set_piece_duties(season, cutoff)
     pen_share, pen_order = duty_lookup(duties, "penalties")
@@ -401,6 +347,20 @@ def build_player_features(cutoff: datetime, target_gw: int,
     fixture_kick = ({(int(r.season), int(r.fixture_id)): r.kickoff
                      for r in fixtures.itertuples()}
                     if not fixtures.empty else {})
+
+    # Map fixtures to teams for the target GW to look up Bzzoiro predictions
+    gw_fixtures = fixtures[fixtures["gw"] == target_gw]
+    opponent_map = {}
+    fixture_map = {}
+    for _, fx in gw_fixtures.iterrows():
+        h_id, a_id = int(fx["home_team_id"]), int(fx["away_team_id"])
+        opponent_map[h_id] = a_id
+        opponent_map[a_id] = h_id
+        fixture_map[h_id] = int(fx["fixture_id"])
+        fixture_map[a_id] = int(fx["fixture_id"])
+
+    teams_df = read_sql(select(T.teams).where(T.teams.c.season == season))
+    team_id_to_name = {int(r.team_id): str(r.name).lower() for r in teams_df.itertuples()} if not teams_df.empty else {}
 
     congestion: dict[int, int] = {}
     window_start = cutoff - timedelta(days=14)
@@ -436,6 +396,15 @@ def build_player_features(cutoff: datetime, target_gw: int,
         starts_hist = h["starts"].fillna(0).astype(int).tolist() if not h.empty and "starts" in h else []
         st = (status_idx.loc[pid].to_dict()
               if status_idx is not None and pid in status_idx.index else {})
+        
+        if strict_point_in_time:
+            required_snapshot_fields = ("team_id", "position", "now_cost")
+            if not st or any(
+                key not in st or st.get(key) is None or pd.isna(st.get(key))
+                for key in required_snapshot_fields
+            ):
+                continue
+        
         pos = str(st.get("position") or p["position"])
         team_id = int(st.get("team_id") or p["team_id"])
 
@@ -443,6 +412,28 @@ def build_player_features(cutoff: datetime, target_gw: int,
         chance = (None if chance is None or (isinstance(chance, float) and np.isnan(chance))
                   else float(chance))
         suspended, season_yellows = _suspension_due(h, st, target_gw)
+
+        # --- EXTERNAL METRICS INJECTION ---
+        p_name_lower = str(p["web_name"]).lower()
+        player_ext = per90_data.get(p_name_lower, {})
+        baseline_npxg90 = player_ext.get("npxg90", 0.0)
+        baseline_xa90 = player_ext.get("xa90", 0.0)
+        
+        team_name = team_id_to_name.get(team_id, "")
+        team_elo = elo_data.get(team_name, 1500.0)
+        
+        opp_team_id = opponent_map.get(team_id)
+        opp_name = team_id_to_name.get(opp_team_id, "") if opp_team_id else ""
+        opp_elo = elo_data.get(opp_name, 1500.0)
+        elo_diff = team_elo - opp_elo
+        
+        set_piece_metrics = team_set_pieces.get(team_name, {})
+        team_xgsp = set_piece_metrics.get("xgsp", 0.0)
+        
+        # Look up Bzzoiro prediction for the fixture
+        fixture_id = fixture_map.get(team_id)
+        bzz_pred = match_predictions.get(str(fixture_id)) if fixture_id else None
+        # ----------------------------------
 
         feat = {
             "starts_last_5": float(sum(1 for x in starts_hist[-5:] if x > 0)),
@@ -458,6 +449,7 @@ def build_player_features(cutoff: datetime, target_gw: int,
             "season_minutes_share": (float(np.mean(minutes_hist) / 90.0)
                                      if minutes_hist else 0.0),
             "selected_by_percent": float(st.get("selected_by_percent") or 0.0),
+            "elo_difference": float(elo_diff),
         }
 
         status_code = str(st.get("status", "a"))
@@ -486,6 +478,7 @@ def build_player_features(cutoff: datetime, target_gw: int,
             hh = h.merge(team_out, on=keys, how="left")
             hh = hh.merge(team_pens, on=keys, how="left")
             hh = hh.merge(team_xg_out, on=keys, how="left")
+            hh = hh.merge(team_xa_out, on=keys, how="left")
 
             tg = hh["team_goals"].fillna(0.0).to_numpy()
             ta = hh["team_assists"].fillna(0.0).to_numpy()
@@ -519,6 +512,20 @@ def build_player_features(cutoff: datetime, target_gw: int,
                 player_pens_taken=pens_scored_est.tolist(),
                 team_pens=tp.tolist(),
                 metric=metric,
+                player_expected_assists=(
+                    hh["expected_assists"].fillna(0).tolist()
+                    if "expected_assists" in hh and hh["expected_assists"].notna().any()
+                    else None
+                ),
+                team_expected_assists=(
+                    hh["team_xa"].fillna(0).tolist()
+                    if "team_xa" in hh and hh["team_xa"].notna().any()
+                    else None
+                ),
+                xa_blend_weight=PARAMS.xa_assist_blend_weight,
+                baseline_npxg90=baseline_npxg90,
+                baseline_xa90=baseline_xa90,
+                blend_weight=PARAMS.external_api_blend_weight,
             )
             defcon_rate = defcon_mod.estimate_defcon_rate(
                 pos, _defcon_series(hh, pos), hh["minutes"].fillna(0).tolist())
@@ -559,7 +566,11 @@ def build_player_features(cutoff: datetime, target_gw: int,
                 pos, [], [], [], None, [], declared_penalty_share=declared_pen,
                 prior_override={"np_goal_share": cs_prior.np_goal_share,
                                "assist_share": cs_prior.assist_share,
-                               "confidence": cs_prior.tier})
+                               "confidence": cs_prior.tier},
+                baseline_npxg90=baseline_npxg90,
+                baseline_xa90=baseline_xa90,
+                blend_weight=PARAMS.external_api_blend_weight,
+            )
             defcon_rate = defcon_mod.estimate_defcon_rate(pos, [], [])
             defcon_rate.per90 = max(cs_prior.defcon_per90, defcon_rate.per90)
             card_rate = cards_mod.estimate_card_rate(pos, [], [], [])
@@ -596,6 +607,10 @@ def build_player_features(cutoff: datetime, target_gw: int,
             "season_yellow_cards": season_yellows,
             "suspended": bool(suspended),
             "games_of_history": int(len(h)),
+            "team_xgsp": team_xgsp,
+            "bzzoiro_expected_goals_home": bzz_pred.get("expected_goals_home") if bzz_pred else None,
+            "bzzoiro_expected_goals_away": bzz_pred.get("expected_goals_away") if bzz_pred else None,
+            "bzzoiro_confidence": bzz_pred.get("confidence") if bzz_pred else None,
         })
     return pd.DataFrame(rows)
 
@@ -664,7 +679,7 @@ def _load_external_records(season: int, cutoff: datetime | None = None) -> dict[
         e = read_sql(select(T.external_player_season).where(*e_conds))
         if e.empty:
             return {}
-    except Exception:      # noqa: BLE001
+    except Exception:
         return {}
     merged = m.merge(e, on="external_id", how="inner")
     out = {}
@@ -679,15 +694,16 @@ def _load_external_records(season: int, cutoff: datetime | None = None) -> dict[
 
 
 def _price_rank_in_team(players: pd.DataFrame, status_idx) -> dict[int, float]:
-    if players.empty:
+    if players.empty or status_idx is None or status_idx.empty:
         return {}
-    df = players[["player_id", "team_id", "now_cost"]].copy()
-    if status_idx is not None and "now_cost" in status_idx:
-        snap = status_idx["now_cost"]
-        df["now_cost"] = df["player_id"].map(snap).fillna(df["now_cost"])
-    if status_idx is not None and "team_id" in status_idx:
-        team = status_idx["team_id"]
-        df["team_id"] = df["player_id"].map(team).fillna(df["team_id"])
+    if not {"now_cost", "team_id"}.issubset(status_idx.columns):
+        return {}
+    df = players[["player_id"]].drop_duplicates().copy()
+    df["now_cost"] = df["player_id"].map(status_idx["now_cost"])
+    df["team_id"] = df["player_id"].map(status_idx["team_id"])
+    df = df.dropna(subset=["now_cost", "team_id"])
+    if df.empty:
+        return {}
     df["rank"] = df.groupby("team_id")["now_cost"].rank(ascending=False, method="min")
     return {int(r.player_id): float(r.rank) for r in df.itertuples()}
 
@@ -758,18 +774,7 @@ def _suspension_due(h: pd.DataFrame, status: dict,
 def build_minutes_training_set(cutoff: datetime,
                                season: int = CURRENT_SEASON
                                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build strictly point-in-time labels for P(play), P(start), P(60+).
-
-    The `team_matches_last_14d` feature used to be constant (all-NaN) for
-    every training row because it read the target's `team_id` from a
-    point-in-time snapshot, and no snapshot exists before a fixture that was
-    played before the system started running. The team_id is now derived
-    from the target fixture itself: a player's team is whichever side of
-    the fixture he appears on, which is point-in-time accurate by
-    construction and needs no snapshot at all. The snapshot is still read
-    for `chance_of_playing` and `is_doubtful`, which are the two fields
-    that genuinely need to be point-in-time.
-    """
+    """Build strictly point-in-time labels for P(play), P(start), P(60+)."""
     history = read_sql(select(T.player_fixture_stats).where(
         (T.player_fixture_stats.c.known_at < cutoff)
         & (T.player_fixture_stats.c.season == season)))
@@ -790,8 +795,6 @@ def build_minutes_training_set(cutoff: datetime,
         return np.empty((0, len(FEATURE_ORDER))), empty, empty, empty
     history["_kickoff"] = pd.to_datetime(history["_kickoff"])
 
-    # Lookup for deriving a player's team_id from the fixture he appeared in.
-    # `fixtures` is a DataFrame; index it by (season, fixture_id).
     fixtures_by_key: dict[tuple[int, int], dict] = {}
     if not fixtures.empty:
         for r in fixtures.itertuples():
@@ -875,15 +878,6 @@ def build_minutes_training_set(cutoff: datetime,
             past5, past3 = mins[-5:], mins[-3:]
             past_starts5 = starts[-5:]
 
-            # team_id for the TARGET fixture. Read from the fixture the
-            # target row belongs to (a player's team is whichever side of
-            # the fixture he appears on) rather than from a point-in-time
-            # snapshot. Almost every early-season training row has no
-            # snapshot -- the system started ingesting after the season
-            # began -- so a snapshot-based team_id was None for nearly every
-            # row and the congestion feature came out NaN for all of them,
-            # which sklearn then dropped as constant. Fixture-derived
-            # team_id is point-in-time accurate by construction.
             target_team_id: int | None = None
             fx = fixtures_by_key.get((int(target["season"]), int(target["fixture_id"])))
             if fx is not None:
@@ -894,6 +888,7 @@ def build_minutes_training_set(cutoff: datetime,
                 target_team_id = st.get("team_id")
             congestion = (_team_congestion(int(target_team_id), target_ko)
                           if target_team_id is not None else np.nan)
+            
             x = [
                 float(sum(1 for x0 in past_starts5 if x0 > 0)),
                 float(np.mean(past5)) if past5 else 0.0,
@@ -908,6 +903,7 @@ def build_minutes_training_set(cutoff: datetime,
                 float(congestion),
                 float(np.mean(mins) / 90.0) if mins else 0.0,
                 float(st.get("selected_by_percent") or 0.0),
+                0.0, # Elo difference placeholder for historical training
             ]
             target_minutes = int(target["minutes"] or 0)
             target_started = int(target["starts"] or 0) > 0

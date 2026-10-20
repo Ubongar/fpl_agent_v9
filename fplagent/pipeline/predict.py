@@ -43,6 +43,7 @@ from fplagent.models.distributions import (
     combine_standard_errors, convolve_quantile_grids, prob_at_least_one,
     quantile_from_grid,
 )
+from fplagent.ingestion.external_apis import fetch_external_metrics
 from fplagent.ingestion.quality import check_predictions
 from fplagent.models.cards import CardRate
 from fplagent.models.defcon import DefconRate
@@ -160,7 +161,8 @@ def run_predictions(target_gw: int, season: int = CURRENT_SEASON,
                     version: str | None = None,
                     n_sims: int | None = None,
                     persist: bool = True,
-                    use_market: bool = True) -> pd.DataFrame:
+                    use_market: bool = True,
+                    strict_point_in_time: bool | None = None) -> pd.DataFrame:
     version = version or model_version()
     n_sims = n_sims or PARAMS.n_sims
 
@@ -170,6 +172,13 @@ def run_predictions(target_gw: int, season: int = CURRENT_SEASON,
     if not gw_row.empty and pd.notna(gw_row.iloc[0]["deadline_time"]):
         deadline = pd.Timestamp(gw_row.iloc[0]["deadline_time"]).to_pydatetime()
     cutoff = cutoff or deadline or datetime.utcnow()
+    if strict_point_in_time is None:
+        cutoff_ts = pd.Timestamp(cutoff)
+        if cutoff_ts.tzinfo is None:
+            cutoff_ts = cutoff_ts.tz_localize("UTC")
+        else:
+            cutoff_ts = cutoff_ts.tz_convert("UTC")
+        strict_point_in_time = cutoff_ts < (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1))
 
     # Current-season fixtures: used for the target-gameweek filter, the xG
     # lookup, and any code that expects a per-fixture_id join that must not
@@ -201,9 +210,14 @@ def run_predictions(target_gw: int, season: int = CURRENT_SEASON,
              ts.n_matches_fit, ts.prior_only, ts.converged,
              ts.league_avg_goals, ts.home_adv_mult, ts.rho)
     (_persist_team_strength(ts, season, target_gw, version) if persist else None)
+    log.info("Fetching external API metrics (Elo, Per-90s)...")
+    fetch_external_metrics()
 
-    features = build_player_features(cutoff, target_gw, season,
-                                     minutes_model=_fit_minutes_model(cutoff, season))
+    features = build_player_features(
+        cutoff, target_gw, season,
+        minutes_model=_fit_minutes_model(cutoff, season),
+        strict_point_in_time=bool(strict_point_in_time),
+    )
     if features.empty:
         log.warning("no player features built")
         return pd.DataFrame()

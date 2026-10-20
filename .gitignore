@@ -1,13 +1,47 @@
+# ==========================================
+# SECRETS & ENVIRONMENT
+# ==========================================
 .env
+.env.local
+.env.*.local
+!.env.example
+
+# ==========================================
+# PYTHON
+# ==========================================
 .venv/
 venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
 .pytest_cache/
-.mypy_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# NEXT.JS / NODE
+# ==========================================
+node_modules/
+.next/
+out/
+build/
+.DS_Store
+
+# ==========================================
+# DATABASES & CACHE
+# ==========================================
 *.db
 *.sqlite
 *.sqlite3
-dashboard/node_modules/
-dashboard/.next/
-dashboard/*.tsbuildinfo
+data/external_metrics.json
+data/fbref_snapshots/*.xlsx
+fpl_agent.db
+
+# ==========================================
+# IDE & OS
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

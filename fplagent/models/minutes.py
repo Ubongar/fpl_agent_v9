@@ -214,6 +214,7 @@ FEATURE_ORDER = [
     "played_last_match", "started_last_match", "days_since_last_start",
     "chance_of_playing", "is_doubtful", "price_rank_in_team",
     "team_matches_last_14d", "season_minutes_share", "selected_by_percent",
+    "elo_difference",
 ]
 
 
@@ -233,6 +234,20 @@ def _usable_feature_mask(X: np.ndarray) -> np.ndarray:
         col = col[~np.isnan(col)]
         mask[j] = np.unique(col).size >= 2
     return mask
+
+
+def _chronological_train_cal_test_slices(n_rows: int, holdout_frac: float = 0.2
+                                         ) -> tuple[slice, slice, slice]:
+    """Return disjoint chronological 60/20/20 train/calibration/test slices by default."""
+    if n_rows < 1:
+        return slice(0, 0), slice(0, 0), slice(0, 0)
+    if not 0.0 < holdout_frac < 0.5:
+        raise ValueError("holdout_frac must be between 0 and 0.5")
+    test_start = int(n_rows * (1.0 - holdout_frac))
+    calibration_start = int(test_start * 0.75)
+    return (slice(0, calibration_start),
+            slice(calibration_start, test_start),
+            slice(test_start, n_rows))
 
 
 class MinutesModel:
@@ -283,57 +298,84 @@ class MinutesModel:
             return False
 
         X = np.asarray(X, dtype=float)
-        self.feature_mask = _usable_feature_mask(X)
-        self.dropped_features = [name for name, keep in
-                                 zip(FEATURE_ORDER, self.feature_mask) if not keep]
-        if not self.feature_mask.any():
-            self.refusal_reason = "every feature is constant"
-            log.warning("MinutesModel: %s; staying on heuristic", self.refusal_reason)
-            return False
-        if self.dropped_features:
-            log.info("MinutesModel: dropped %d constant feature(s): %s",
-                     len(self.dropped_features), ", ".join(self.dropped_features))
-        X = X[:, self.feature_mask]
 
         if (len(np.unique(y_play)) < 2 or len(np.unique(y_start)) < 2
                 or len(np.unique(y_sixty)) < 2):
             self.refusal_reason = "one or more targets have a single class"
             return False
 
-        cut = int(len(X) * (1.0 - holdout_frac))
-        X_tr, X_ho = X[:cut], X[cut:]
-        if (len(X_ho) < 50 or len(np.unique(y_play[:cut])) < 2
-                or len(np.unique(y_start[:cut])) < 2
-                or len(np.unique(y_sixty[:cut])) < 2):
-            X_tr, X_ho = X, X[:0]
+        train_slice, calibration_slice, test_slice = _chronological_train_cal_test_slices(
+            len(X), holdout_frac
+        )
+
+        # Compute the usable-feature mask on the training slice only.
+        # A column that is constant in X_tr makes sklearn's HistGradientBoosting
+        # binning fail with "window shape cannot be larger than input array shape",
+        # even if that column varies elsewhere in the full chronological data.
+        X_tr_raw = X[train_slice]
+        self.feature_mask = _usable_feature_mask(X_tr_raw)
+        self.dropped_features = [name for name, keep in
+                                 zip(FEATURE_ORDER, self.feature_mask) if not keep]
+        if not self.feature_mask.any():
+            self.refusal_reason = "every feature is constant in the training slice"
+            log.warning("MinutesModel: %s; staying on heuristic", self.refusal_reason)
+            return False
+        if self.dropped_features:
+            log.info("MinutesModel: dropped %d constant feature(s) in training slice: %s",
+                     len(self.dropped_features), ", ".join(self.dropped_features))
+        X = X[:, self.feature_mask]
+
+        X_tr = X[train_slice]
+        X_cal = X[calibration_slice]
+        X_ho = X[test_slice]
+        y_play_tr = y_play[train_slice]
+        y_start_tr = y_start[train_slice]
+        y_sixty_tr = y_sixty[train_slice]
+
+        if (len(X_tr) < 100 or len(X_cal) < 50 or len(X_ho) < 50
+                or len(np.unique(y_play_tr)) < 2
+                or len(np.unique(y_start_tr)) < 2
+                or len(np.unique(y_sixty_tr)) < 2):
+            self.refusal_reason = (
+                "insufficient chronological train/calibration/test rows "
+                "or class diversity; staying on heuristic"
+            )
+            log.info("MinutesModel: %s", self.refusal_reason)
+            return False
 
         common = dict(max_iter=300, learning_rate=0.06, max_depth=5,
                       l2_regularization=1.0, early_stopping=False,
                       random_state=7)
-        self.play_model = HistGradientBoostingClassifier(**common).fit(
-            X_tr, y_play[:len(X_tr)])
-        self.start_model = HistGradientBoostingClassifier(**common).fit(
-            X_tr, y_start[:len(X_tr)])
-        self.sixty_model = HistGradientBoostingClassifier(**common).fit(
-            X_tr, y_sixty[:len(X_tr)])
+        self.play_model = HistGradientBoostingClassifier(**common).fit(X_tr, y_play_tr)
+        self.start_model = HistGradientBoostingClassifier(**common).fit(X_tr, y_start_tr)
+        self.sixty_model = HistGradientBoostingClassifier(**common).fit(X_tr, y_sixty_tr)
 
-        if len(X_ho) >= 50:
-            for name, model, y in (("play", self.play_model, y_play),
-                                   ("start", self.start_model, y_start),
-                                   ("sixty", self.sixty_model, y_sixty)):
-                raw = model.predict_proba(X_ho)[:, 1]
-                y_ho = y[len(X_tr):]
-                if len(np.unique(y_ho)) < 2:
-                    continue
-                iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-                iso.fit(raw, y_ho)
-                setattr(self, f"{name}_calibrator", iso)
-                calibrated = iso.predict(raw)
-                self._holdout_pred[name] = np.asarray(calibrated, dtype=float)
-                self._holdout_y[name] = np.asarray(y_ho, dtype=float)
-                self.holdout[f"{name}_brier_raw"] = float(np.mean((raw - y_ho) ** 2))
-                self.holdout[f"{name}_brier_cal"] = float(
-                    np.mean((calibrated - y_ho) ** 2))
+        # Calibrators see the middle chronological block only. The final block remains
+        # untouched until scoring the fitted models.
+        for name, model, y in (("play", self.play_model, y_play),
+                               ("start", self.start_model, y_start),
+                               ("sixty", self.sixty_model, y_sixty)):
+            raw_cal = model.predict_proba(X_cal)[:, 1]
+            y_cal = y[calibration_slice]
+            calibrator = None
+            if len(np.unique(y_cal)) >= 2:
+                calibrator = IsotonicRegression(
+                    out_of_bounds="clip", y_min=0.0, y_max=1.0
+                )
+                calibrator.fit(raw_cal, y_cal)
+                setattr(self, f"{name}_calibrator", calibrator)
+
+            raw_test = model.predict_proba(X_ho)[:, 1]
+            y_test = y[test_slice]
+            calibrated = (
+                calibrator.predict(raw_test) if calibrator is not None else raw_test
+            )
+            self._holdout_pred[name] = np.asarray(calibrated, dtype=float)
+            self._holdout_y[name] = np.asarray(y_test, dtype=float)
+            self.holdout[f"{name}_brier_raw"] = float(np.mean((raw_test - y_test) ** 2))
+            self.holdout[f"{name}_brier_cal"] = float(
+                np.mean((calibrated - y_test) ** 2)
+            )
 
         self.n_train = len(X_tr)
 
