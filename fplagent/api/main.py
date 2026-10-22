@@ -1,25 +1,16 @@
-"""FastAPI service.
-
-A thin transport layer over the modules in fplagent/. No business logic lives
-here -- every endpoint is a call into code that is unit-tested independently
-and can be run from the CLI without a server.
-
-    uvicorn fplagent.api.main:app --reload --port 8000
-    open http://localhost:8000/docs
-"""
+"""FastAPI service."""
 from __future__ import annotations
 
 import json
 import logging
 import os
-import subprocess
-import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -35,8 +26,6 @@ log = logging.getLogger(__name__)
 
 
 class SafeJSONResponse(JSONResponse):
-    """JSON that never contains NaN or Infinity."""
-
     def render(self, content) -> bytes:
         return json.dumps(to_json_safe(content), ensure_ascii=False,
                           allow_nan=False, separators=(",", ":"),
@@ -47,23 +36,11 @@ API_KEY = os.getenv("FPL_AGENT_API_KEY", "")
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)):
-    """Optional API-key gate. Unset means local/dev mode remains open."""
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="invalid or missing API key")
 
 
 def _looks_like_local_only() -> bool:
-    """Best-effort guess at whether this process is a local/dev deployment.
-
-    The app has no reliable way to see the bind host uvicorn was started
-    with -- that lives in the ASGI server's own config, not in FastAPI.
-    DATABASE_URL is a proxy that is available in-process and correlates
-    well in practice: a real deployment almost always points at a remote
-    Postgres, while local/dev runs use the SQLite default or a
-    localhost/127.0.0.1 Postgres. This is a heuristic for a *warning*, not
-    a security control -- it can be wrong in either direction, which is
-    exactly why the check below only ever logs, never blocks.
-    """
     url = DATABASE_URL.lower()
     if url.startswith("sqlite"):
         return True
@@ -71,29 +48,12 @@ def _looks_like_local_only() -> bool:
 
 
 def _warn_if_open() -> None:
-    """Loud, impossible-to-miss log line when auth is off.
-
-    Silence here is exactly how "local/dev mode remains open" quietly
-    becomes "the internet can call /optimise/squad and /manager/{id}/team
-    with no key". This never blocks startup -- an open local dev server is
-    a legitimate, common setup -- it just makes sure nobody finds out they
-    forgot to set FPL_AGENT_API_KEY from a support ticket instead of a log.
-    """
     if API_KEY:
         return
     if _looks_like_local_only():
-        log.info(
-            "FPL_AGENT_API_KEY is not set -- API is unauthenticated. "
-            "Fine for local/dev use against %s.", DATABASE_URL,
-        )
+        log.info("FPL_AGENT_API_KEY is not set -- API is unauthenticated.")
     else:
-        log.warning(
-            "*** FPL_AGENT_API_KEY is not set and DATABASE_URL does not "
-            "look local (%s). Every endpoint, including /optimise/squad "
-            "and /manager/{entry_id}/team, is reachable with NO "
-            "authentication. Set FPL_AGENT_API_KEY before exposing this "
-            "beyond localhost. ***", DATABASE_URL,
-        )
+        log.warning("*** FPL_AGENT_API_KEY is not set. API is reachable with NO authentication. ***")
 
 
 @asynccontextmanager
@@ -118,10 +78,47 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
+# --- PIPELINE BACKGROUND TASK ---
+def run_pipeline_task():
+    import subprocess
+    import sys
+    log.info("Starting background FPL pipeline run...")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "fplagent.cli", "run"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        log.info("Pipeline finished successfully.")
+    except subprocess.CalledProcessError as e:
+        log.error("Pipeline failed with exit code %d. Error: %s", e.returncode, e.stderr)
+    except Exception as e:
+        log.error("Failed to run pipeline: %s", e)
+
+
+@app.post("/sync-data", tags=["system"])
+async def trigger_sync(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_pipeline_task)
+    return {"status": "success", "message": "Pipeline started."}
+
+
+@app.get("/pipeline/status", tags=["system"])
+def pipeline_status():
+    status_file = Path("data/pipeline_status.json")
+    if not status_file.exists():
+        return {"status": "idle", "message": "No pipeline running."}
+    try:
+        content = status_file.read_text()
+        if not content.strip():
+            return {"status": "running", "message": "Starting up..."}
+        return json.loads(content)
+    except Exception:
+        return {"status": "running", "message": "Processing..."}
+# --------------------------------
 
 
 def _num(x, default: float = 0.0) -> float:
-    """A float, with None and NaN mapped to `default`."""
     try:
         f = float(x)
     except (TypeError, ValueError):
@@ -130,7 +127,6 @@ def _num(x, default: float = 0.0) -> float:
 
 
 def _player_names_map(season: int) -> dict[int, dict]:
-    """player_id -> {web_name, position, team_id, short_name}."""
     players_df = read_sql(select(T.players).where(T.players.c.season == season))
     if players_df.empty:
         return {}
@@ -150,7 +146,6 @@ def _player_names_map(season: int) -> dict[int, dict]:
 
 
 def _decision_pack(df: pd.DataFrame, season: int | None = None, gw: int | None = None) -> pd.DataFrame:
-    """Attach transparent decision metrics used by the v9 dashboard."""
     from fplagent.models.decision import decision_metrics
     if df.empty:
         return df
@@ -172,7 +167,6 @@ def _decision_pack(df: pd.DataFrame, season: int | None = None, gw: int | None =
 
 
 def _captain_candidates(df, real_eo: dict[int, float], n: int = 50) -> list[dict]:
-    """Captaincy inputs from a latest_predictions frame."""
     return [{
         "player_id": int(r.player_id), "name": r.web_name, "xp": float(r.xp_mean),
         "p10": _num(getattr(r, "xp_p10", None)), "p90": _num(getattr(r, "xp_p90", None)),
@@ -185,33 +179,6 @@ def _captain_candidates(df, real_eo: dict[int, float], n: int = 50) -> list[dict
 
 
 @app.get("/health", tags=["system"])
-def run_pipeline_task():
-    """Runs the full ingestion and prediction pipeline in the background."""
-    log.info("Starting background FPL pipeline run...")
-    try:
-        # We use sys.executable to ensure it uses the exact same .venv that FastAPI is running in
-        result = subprocess.run(
-            [sys.executable, "-m", "fplagent.cli", "run", "--fbref-csv", "data/fbref_snapshots"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        log.info("Pipeline finished successfully.")
-    except subprocess.CalledProcessError as e:
-        log.error("Pipeline failed with exit code %d. Error: %s", e.returncode, e.stderr)
-    except Exception as e:
-        log.error("Failed to run pipeline: %s", e)
-
-
-@app.post("/sync-data", tags=["system"])
-async def trigger_sync(background_tasks: BackgroundTasks):
-    """Trigger a full model pipeline run from the web interface."""
-    background_tasks.add_task(run_pipeline_task)
-    return {
-        "status": "success", 
-        "message": "Pipeline started in the background. It will take about 7 minutes."
-    }
-    
 def health():
     from fplagent.db.session import session_scope
     from sqlalchemy import text
@@ -239,21 +206,6 @@ def current_gameweek(season: int = CURRENT_SEASON):
 
 @app.get("/manager/{entry_id}/team", tags=["manager"])
 def manager_team(entry_id: int, gw: int | None = None, season: int = CURRENT_SEASON):
-    """A real manager's current squad, fetched live from FPL's own public
-    endpoints.
-
-    Predictions are looked up for the UPCOMING gameweek (the one
-    `resolve_target_gw` returns), not for `team.gw`. `team.gw` is what FPL
-    reports for the picks themselves -- usually the most recently COMPLETED
-    gameweek -- and that gameweek frequently has no stored predictions at
-    all: a fresh deployment has none before today, and `evaluate --replay`
-    deliberately does not persist. Looking up predictions by `team.gw`
-    therefore returned an empty frame and the frontend rendered all fifteen
-    picks as "player <id>" with no club, price or xP.
-
-    The prediction the manager actually cares about is for the gameweek
-    they are about to play, so that is what this now fetches.
-    """
     from fplagent.ingestion.manager_team import get_my_team
     from fplagent.optimizers.transfers import sell_price
     from fplagent.pipeline.run import latest_predictions
@@ -262,13 +214,9 @@ def manager_team(entry_id: int, gw: int | None = None, season: int = CURRENT_SEA
         team = get_my_team(entry_id, gw=gw, season=season)
     except ValueError as e:
         raise HTTPException(404, str(e))
-    except Exception as e:      # noqa: BLE001
+    except Exception as e:
         raise HTTPException(502, f"could not reach the FPL API: {e}")
 
-    # `latest_predictions(season)` with no gw resolves the target gameweek
-    # internally, and returns that gameweek's newest stored version. If the
-    # target has no predictions yet it returns an empty frame, which is
-    # better than silently falling back to a stale gameweek.
     preds = latest_predictions(season)
     pred_by_id = ({int(r.player_id): r for r in preds.itertuples()}
                  if not preds.empty else {})
@@ -319,7 +267,6 @@ def predictions(season: int = CURRENT_SEASON, gw: int | None = None,
                 sort: str = "xp_mean", desc: bool = True,
                 offset: int = Query(0, ge=0),
                 limit: int = Query(50, ge=1, le=1000)):
-    """Paginated, filterable, sortable."""
     from fplagent.pipeline.run import latest_predictions
     df = latest_predictions(season, gw)
     if df.empty:
@@ -353,7 +300,6 @@ def teams(season: int = CURRENT_SEASON):
 
 @app.get("/evaluation/history", tags=["evaluation"])
 def evaluation_history(season: int = CURRENT_SEASON, limit: int = Query(50, ge=1, le=200)):
-    """Every backtest run, newest first."""
     df = read_sql(select(T.evaluation_runs).where(
         T.evaluation_runs.c.season == season))
     if df.empty:
@@ -366,7 +312,6 @@ def evaluation_history(season: int = CURRENT_SEASON, limit: int = Query(50, ge=1
 def evaluation_latest(season: int = CURRENT_SEASON, gw_from: int = 2,
                       gw_to: int | None = None, replay: bool = False,
                       auto_replay: bool = True, explain: bool = False):
-    """Score the model."""
     from fplagent.evaluation.backtest import backtest
     result = backtest(season=season, gw_from=gw_from, gw_to=gw_to,
                       replay=replay, persist=False)
@@ -376,8 +321,7 @@ def evaluation_latest(season: int = CURRENT_SEASON, gw_from: int = 2,
         result["mode"] = "replay"
         result["mode_note"] = (
             "No predictions were stored before these deadlines, so history was "
-            "replayed through the point-in-time feature path. That is weaker "
-            "evidence than scoring predictions written in advance.")
+            "replayed through the point-in-time feature path.")
     else:
         result.setdefault("mode", "replay" if replay else "stored")
     if explain:
@@ -388,7 +332,6 @@ def evaluation_latest(season: int = CURRENT_SEASON, gw_from: int = 2,
 
 @app.get("/evaluation/track-record", tags=["evaluation"])
 def evaluation_track_record(season: int = CURRENT_SEASON, limit: int = Query(10, ge=1, le=52)):
-    """Plain-language trust surface over evaluation_runs."""
     df = read_sql(select(T.evaluation_runs).where(T.evaluation_runs.c.season == season))
     if df.empty:
         return {"season": season, "runs_considered": 0,
@@ -404,17 +347,13 @@ def evaluation_track_record(season: int = CURRENT_SEASON, limit: int = Query(10,
         lines.append(
             f"Across the last {len(top10)} scored gameweek(s), the actual "
             f"top scorer landed in the model's top-10 captain shortlist "
-            f"{top10.mean():.0%} of the time"
-            + (f", and in the top-5 {top5.mean():.0%} of the time" if len(top5) else "")
-            + ".")
+            f"{top10.mean():.0%} of the time")
     if len(beat_baseline):
         lines.append(
-            f"The model beat the best simple baseline (recent form / price / "
-            f"next-fixture-only) in {beat_baseline.mean():.0%} of scored "
-            f"gameweeks.")
+            f"The model beat the best simple baseline in {beat_baseline.mean():.0%} of scored gameweeks.")
     if not lines:
         lines.append("Stored runs exist but don't yet include captain hit-rate "
-                     "or baseline-comparison fields -- re-run the backtest.")
+                     "or baseline-comparison fields.")
     return {
         "season": season, "runs_considered": n,
         "top10_captain_hit_rate_avg": None if not len(top10) else round(float(top10.mean()), 3),
@@ -443,7 +382,6 @@ def team_strength(season: int = CURRENT_SEASON, gw: int | None = None):
 
 @app.get("/set-pieces", tags=["predictions"])
 def set_pieces(season: int = CURRENT_SEASON, duty: str = "penalties"):
-    """Declared set-piece duty, ordered."""
     from fplagent.features.build import load_set_piece_duties
     df = load_set_piece_duties(season)
     if not df.empty:
@@ -474,7 +412,6 @@ def changes(gw_now: int, gw_prev: int, season: int = CURRENT_SEASON,
 
 
 def _prediction_freshness(row) -> dict:
-    """How old is the data this prediction is based on, in plain terms."""
     created = row.get("created_at") if hasattr(row, "get") else row["created_at"]
     if created is None or pd.isna(created):
         return {"age_hours": None, "note": "creation time not recorded"}
@@ -484,16 +421,13 @@ def _prediction_freshness(row) -> dict:
     elif age < 24:
         note = "same-day -- check for team news before a late deadline"
     else:
-        note = ("more than a day old -- re-run the pipeline close to your "
-               "deadline if there's been team news since")
+        note = "more than a day old -- re-run the pipeline close to your deadline"
     return {"age_hours": round(age, 1), "note": note}
 
 
 @app.get("/predictions/{player_id}", tags=["predictions"])
 def player_detail(player_id: int, season: int = CURRENT_SEASON,
                    explain: bool = False, live_news: bool = False):
-    """Full drilldown: every component of the projection, the inputs that
-    produced it, and the simulated distribution."""
     from fplagent.models.consistency import check_prediction
     from fplagent.models.distributions import prob_at_least_one
     from fplagent.models.decision import decision_metrics
@@ -596,7 +530,6 @@ class ChipRequest(BaseModel):
 
 @app.post("/optimise/chips", tags=["optimisers"])
 def optimise_chips(req: ChipRequest, explain: bool = False):
-    """Chip scheduling under the two-window structure."""
     from fplagent.optimizers.chips import schedule_chips
     chip_values = {chip: {int(g): float(v) for g, v in (by_gw or {}).items()}
                    for chip, by_gw in req.chip_values.items()}
@@ -614,7 +547,6 @@ def optimise_chips(req: ChipRequest, explain: bool = False):
 @app.get("/optimise/chips/auto", tags=["optimisers"])
 def optimise_chips_auto(season: int = CURRENT_SEASON, gw: int | None = None,
                         horizon: int = 14, entry_id: int | None = None):
-    """Auto-computed chip schedule from stored predictions."""
     from fplagent.optimizers.chip_values import compute_chip_values
     from fplagent.optimizers.chips import schedule_chips
     from fplagent.pipeline.run import latest_predictions
@@ -635,9 +567,7 @@ def optimise_chips_auto(season: int = CURRENT_SEASON, gw: int | None = None,
     if not predictions_by_gw:
         raise HTTPException(
             404,
-            f"No predictions stored for any gameweek in {gws[0]}-{gws[-1]}. "
-            f"Run `fplagent predict --gw N` for each, or use the CLI "
-            f"`fplagent chips` command which predicts on demand.")
+            f"No predictions stored for any gameweek in {gws[0]}-{gws[-1]}. ")
 
     current_squad = None
     if entry_id:
@@ -657,7 +587,7 @@ def optimise_chips_auto(season: int = CURRENT_SEASON, gw: int | None = None,
                         "club": str(r.team_id),
                         "price": float(r.now_cost or 4.0),
                     } for r in pdf.itertuples()]
-        except Exception:      # noqa: BLE001
+        except Exception:
             current_squad = None
 
     cv = compute_chip_values(
@@ -719,13 +649,12 @@ class CaptaincyRequest(BaseModel):
 
 
 def _load_effective_ownership(season: int, gw: int | None) -> dict[int, float]:
-    """Real sampled EO if it exists for this gameweek."""
     try:
         q = select(T.effective_ownership).where(T.effective_ownership.c.season == season)
         if gw is not None:
             q = q.where(T.effective_ownership.c.gw == gw)
         df = read_sql(q)
-    except Exception:      # noqa: BLE001
+    except Exception:
         return {}
     if df.empty:
         return {}
@@ -800,7 +729,6 @@ def transfers(req: TransferRequest, season: int = CURRENT_SEASON,
 
 @app.get("/quality", tags=["system"])
 def quality(limit: int = 50, explain: bool = False):
-    """Recent data-quality events."""
     df = read_sql(select(T.data_quality_events))
     if df.empty:
         return {"events": []}
@@ -821,7 +749,6 @@ class HeadToHeadRequest(BaseModel):
 
 @app.post("/compare/captaincy", tags=["optimisers"])
 def compare_captaincy(req: HeadToHeadRequest, season: int = CURRENT_SEASON):
-    """Head-to-head: P(A outscores B) this gameweek."""
     from fplagent.models.distributions import pairwise_win_probability
     from fplagent.pipeline.run import latest_predictions
     df = latest_predictions(season, req.gw)
@@ -855,8 +782,6 @@ class RankImpactRequest(BaseModel):
 
 
 def _rank_tier(swing: float) -> str:
-    """Bucket a raw swing estimate into a tier rather than presenting a
-    number with false precision."""
     a = abs(swing)
     if a < 2_000:
         return "small"
@@ -869,8 +794,6 @@ def _rank_tier(swing: float) -> str:
 
 @app.post("/rank-impact", tags=["optimisers"])
 def rank_impact(req: RankImpactRequest):
-    """Translate a pick's point distribution into a rough rank-swing
-    estimate."""
     import numpy as np
     rank = max(1, req.current_overall_rank)
     total = max(rank, req.total_managers)
@@ -896,8 +819,6 @@ def rank_impact(req: RankImpactRequest):
 @app.get("/brief", tags=["optimisers"])
 def weekly_brief(season: int = CURRENT_SEASON, gw: int | None = None,
                  explain: bool = False):
-    """One call that gathers captaincy shortlist, chip status and any
-    consistency flags together."""
     from fplagent.models.consistency import check_prediction
     from fplagent.optimizers.captaincy import rank_captains
     from fplagent.pipeline.run import latest_predictions
@@ -931,7 +852,6 @@ def weekly_brief(season: int = CURRENT_SEASON, gw: int | None = None,
 
 @app.get("/dashboard/overview", tags=["dashboard"])
 def dashboard_overview(season: int = CURRENT_SEASON, gw: int | None = None):
-    """Single-call command centre payload for the v9 dashboard."""
     from fplagent.pipeline.run import latest_predictions
     from fplagent.db.repository import latest_snapshot_per_player
 
@@ -982,11 +902,6 @@ COMPARE_FIXTURE_HORIZON = 5
 
 
 def _position_difficulty(position: str | None, row: dict) -> float:
-    """Pick the difficulty that matters for a position.
-
-    GK/DEF are paid for clean sheets (defensive difficulty); FWD for goals
-    (attacking difficulty); MID is paid for both, so it takes the mean.
-    """
     d, a = float(row["def_difficulty"]), float(row["att_difficulty"])
     if position in ("GK", "DEF"):
         return d
@@ -1011,14 +926,10 @@ def compare_players(req: CompareRequest):
     cols = ["player_id","web_name","position","short_name","team_id","now_cost","xp_mean","xp_p10","xp_p25","xp_p50","xp_p75","xp_p90","p_play","p_start","p_sixty","p_haul_10plus","p_blank_le2","xp_se","value","certainty","upside_points","downside_points","range_points","start_security","sixty_security","minutes_stability","floor_adjusted_xp","ceiling_adjusted_xp","ownership_adjusted_upside","ownership_adjusted_downside","quartile_range_points","start_gap","bench_risk","floor_value_per_million","ceiling_value_per_million","ownership"]
     records = rows[cols].to_dict("records")
 
-    # Upcoming fixtures per player's team, difficulty chosen by position.
     fx = _fixture_difficulty_rows(req.season, int(rows["gw"].iloc[0]), COMPARE_FIXTURE_HORIZON)
     by_team = {int(t): g.sort_values("gw") for t, g in fx.groupby("team_id")} if not fx.empty else {}
 
     for rec in records:
-        # Single-gameweek consistency flags. The week-over-week flag needs the
-        # prior gameweek's row, which this endpoint does not load, so it stays
-        # on /predictions/{player_id} where that history is already fetched.
         rec["flags"] = [f.__dict__ for f in check_prediction({
             "xp_mean": rec.get("xp_mean"), "p_play": rec.get("p_play"),
             "xp_p10": rec.get("xp_p10"), "xp_p90": rec.get("xp_p90")})]
@@ -1035,23 +946,6 @@ def compare_players(req: CompareRequest):
 
 
 def _fixture_difficulty_rows(season: int, gw: int, horizon: int) -> pd.DataFrame:
-    """One row per (team, fixture) from `gw` for `horizon` gameweeks.
-
-    Three difficulty numbers on a 1-5 scale (5 = hardest), because a single
-    number cannot be right for every position:
-
-      def_difficulty  how hard it is to keep a clean sheet / avoid conceding:
-                      opponent attack against this team's own defence. This
-                      is the original `difficulty` formula, unchanged.
-      att_difficulty  how hard it is to score: this team's attack against the
-                      opponent's defence. Ratings are log-space with
-                      lambda = exp(mu + alpha_attack - beta_defence), so a
-                      HIGHER opponent defence rating makes scoring harder.
-      difficulty      alias of def_difficulty, kept so /fixtures/outlook and
-                      its dashboard page are byte-for-byte compatible.
-
-    Returns an empty frame when there are no fixtures in the window.
-    """
     fixtures = read_sql(select(T.fixtures).where(
         (T.fixtures.c.season == season) & (T.fixtures.c.gw >= gw) & (T.fixtures.c.gw < gw + horizon)))
     if fixtures.empty:
@@ -1061,26 +955,45 @@ def _fixture_difficulty_rows(season: int, gw: int, horizon: int) -> pd.DataFrame
     s = {int(r.team_id): r for r in strengths.itertuples()}
     teams_df = read_sql(select(T.teams).where(T.teams.c.season == season))
     names = {int(r.team_id): (r.name, r.short_name) for r in teams_df.itertuples()}
+    
     rows = []
     for r in fixtures.itertuples():
         for team_id, opp_id, home in ((int(r.home_team_id), int(r.away_team_id), True),
                                       (int(r.away_team_id), int(r.home_team_id), False)):
             opp = s.get(opp_id)
             own = s.get(team_id)
-            def_d = att_d = 3.0
-            if opp is not None:
-                own_def = float(own.defence) if own is not None else 0.0
-                own_att = float(own.attack) if own is not None else 0.0
-                def_d = float(np.clip(3.0 + 0.9 * float(opp.attack) - 0.9 * own_def, 1.0, 5.0))
-                att_d = float(np.clip(3.0 + 0.9 * float(opp.defence) - 0.9 * own_att, 1.0, 5.0))
+            
+            fpl_def_d = att_d = 3.0
+            model_def_d = model_att_d = 3.0
+            
+            if opp is not None and own is not None:
+                own_def = float(own.defence)
+                own_att = float(own.attack)
+                opp_att = float(opp.attack)
+                opp_def = float(opp.defence)
+                
+                fpl_def_d = float(np.clip(3.0 + 0.9 * opp_att - 0.9 * own_def, 1.0, 5.0))
+                att_d = float(np.clip(3.0 + 0.9 * opp_def - 0.9 * own_att, 1.0, 5.0))
+                
+                model_att_d = float(np.clip(3.0 + 1.2 * (opp_def - 1.0), 1.0, 5.0))
+                model_def_d = float(np.clip(3.0 + 1.2 * (opp_att - 1.0), 1.0, 5.0))
+                
+            if hasattr(r, 'team_h_difficulty') and home:
+                fpl_def_d = float(r.team_h_difficulty)
+            elif hasattr(r, 'team_a_difficulty') and not home:
+                fpl_def_d = float(r.team_a_difficulty)
+
             rows.append({
                 "gw": int(r.gw), "team_id": team_id,
                 "team": names.get(team_id, (str(team_id), str(team_id)))[1],
                 "opponent_id": opp_id,
                 "opponent": names.get(opp_id, (str(opp_id), str(opp_id)))[1],
                 "home": home,
-                "difficulty": round(def_d, 2),
-                "def_difficulty": round(def_d, 2),
+                "fpl_difficulty": round(fpl_def_d, 2),
+                "model_attack_difficulty": round(model_att_d, 2),
+                "model_defence_difficulty": round(model_def_d, 2),
+                "difficulty": round(fpl_def_d, 2),
+                "def_difficulty": round(fpl_def_d, 2),
                 "att_difficulty": round(att_d, 2),
             })
     return pd.DataFrame(rows)
@@ -1088,7 +1001,6 @@ def _fixture_difficulty_rows(season: int, gw: int, horizon: int) -> pd.DataFrame
 
 @app.get("/fixtures/outlook", tags=["dashboard"])
 def fixture_outlook(season: int = CURRENT_SEASON, start_gw: int | None = None, horizon: int = Query(6, ge=1, le=10)):
-    """Team fixture difficulty/outlook using the latest fitted strength surface."""
     gw = start_gw or resolve_target_gw(season)
     if gw is None:
         raise HTTPException(404, "No gameweek data stored.")
@@ -1105,16 +1017,6 @@ def fixture_outlook(season: int = CURRENT_SEASON, start_gw: int | None = None, h
 
 @app.get("/market/watch", tags=["dashboard"])
 def market_watch(season: int = CURRENT_SEASON, limit: int = Query(40, ge=5, le=100)):
-    """Market activity, resolved to player NAMES.
-
-    `transfer_ratio` is net transfers divided by the player's current owner
-    count, not divided by ownership percent. The previous version divided a
-    count by a percent, producing a number whose only possible use was
-    relative ordering and whose magnitude (25,000+) was meaningless. It is
-    now a genuine "fraction of the current owner base that moved this
-    period", on a scale where 0.05 means 5% of owners transferred the player
-    in (net) and 0.5 means half the owner base did.
-    """
     from fplagent.db.repository import latest_snapshot_per_player
     snaps = latest_snapshot_per_player(season)
     if snaps.empty:
@@ -1123,8 +1025,6 @@ def market_watch(season: int = CURRENT_SEASON, limit: int = Query(40, ge=5, le=1
     snaps["net_transfers"] = (snaps["transfers_in_event"].fillna(0)
                               - snaps["transfers_out_event"].fillna(0))
 
-    # Ownership is a percent (28.4 == 28.4%), so multiply by total managers
-    # / 100 to get an approximate count of owners.
     owners_count = (snaps["selected_by_percent"].fillna(0) / 100.0) * TOTAL_MANAGERS
     snaps["transfer_ratio"] = snaps["net_transfers"] / owners_count.replace(0, np.nan)
 
@@ -1166,7 +1066,6 @@ class DecisionLogRequest(BaseModel):
 
 @app.post("/decisions", tags=["decisions"])
 def log_decision(req: DecisionLogRequest):
-    """Log what the system recommended against what the manager actually did."""
     from fplagent.db.session import session_scope
     from sqlalchemy import insert as sa_insert
     payload = {"recommended": req.recommended, "actual": req.actual}
@@ -1181,7 +1080,6 @@ def log_decision(req: DecisionLogRequest):
 
 @app.post("/decisions/{rec_id}/outcome", tags=["decisions"])
 def log_decision_outcome(rec_id: int, actual_outcome: dict):
-    """Attach the realised result once the gameweek has been played."""
     from sqlalchemy import update as sa_update
     from fplagent.db.session import session_scope
     with session_scope() as s:
@@ -1197,7 +1095,6 @@ def log_decision_outcome(rec_id: int, actual_outcome: dict):
 
 @app.get("/decisions/track-record", tags=["decisions"])
 def decisions_track_record(season: int = CURRENT_SEASON, rec_type: str | None = None):
-    """Personal decision history, resolved to player names where applicable."""
     q = select(T.recommendations).where(T.recommendations.c.season == season)
     if rec_type:
         q = q.where(T.recommendations.c.rec_type == rec_type)
@@ -1253,3 +1150,130 @@ def decisions_track_record(season: int = CURRENT_SEASON, rec_type: str | None = 
             "each gameweek finishes to build up a personal track record."
         ),
     }
+
+
+# --- LLM NEWS BRIEFING & TEAM ANALYSIS ---
+@app.get("/news/briefing", tags=["dashboard"])
+def news_briefing(season: int = CURRENT_SEASON, entry_id: int | None = None):
+    from fplagent.db.repository import latest_snapshot_per_player
+    from openai import OpenAI
+    from fplagent.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+    from fplagent.ingestion.manager_team import get_my_team
+    from fplagent.pipeline.run import latest_predictions
+
+    if not LLM_API_KEY:
+        raise HTTPException(400, "LLM API key not configured in .env")
+
+    snaps = latest_snapshot_per_player(season)
+    if snaps.empty:
+        raise HTTPException(404, "No player snapshots found.")
+
+    names = _player_names_map(season)
+    
+    # 1. Get Global News
+    top_players = snaps.nlargest(50, "selected_by_percent")
+    out_list = []
+    doubt_list = []
+    
+    for _, r in top_players.iterrows():
+        news = str(r.get("news", "")).strip()
+        if news and news.lower() != "nan" and len(news) > 3:
+            pid = int(r["player_id"])
+            p_info = names.get(pid, {})
+            p_name = p_info.get("web_name", "Unknown")
+            p_team = p_info.get("short_name", "Unknown")
+            chance = r.get('chance_of_playing_next_round')
+            status = str(r.get('status', 'a')).lower()
+            
+            item = f"- **{p_name}** ({p_team}) | News: {news}"
+            
+            if status in ('i', 's', 'u') or chance == 0:
+                out_list.append(item)
+            elif chance is not None and 0 < chance <= 75:
+                doubt_list.append(f"{item} | Chance: {chance}%")
+
+    global_news_str = ""
+    if out_list:
+        global_news_str += "OUT:\n" + "\n".join(out_list) + "\n\n"
+    if doubt_list:
+        global_news_str += "DOUBTFUL:\n" + "\n".join(doubt_list)
+
+    # 2. Get User Team if entry_id provided
+    team_str = ""
+    if entry_id:
+        try:
+            team = get_my_team(entry_id, season=season)
+            preds = latest_predictions(season)
+            pred_by_id = {int(r.player_id): r for r in preds.itertuples()} if not preds.empty else {}
+            
+            squad_lines = []
+            for pick in team.picks:
+                p_info = names.get(pick.player_id, {})
+                p_name = p_info.get("web_name", f"Player {pick.player_id}")
+                p_pos = p_info.get("position", "Unknown")
+                p_team = p_info.get("short_name", "Unknown")
+                pred = pred_by_id.get(pick.player_id)
+                xp = f"{float(pred.xp_mean):.2f} xP" if pred is not None else "No prediction"
+                
+                # Check if they have news
+                snap = snaps[snaps["player_id"] == pick.player_id]
+                p_news = ""
+                if not snap.empty:
+                    n = str(snap.iloc[0].get("news", "")).strip()
+                    if n and n.lower() != "nan":
+                        p_news = f" [NEWS: {n}]"
+                        
+                squad_lines.append(f"- {p_name} ({p_team}, {p_pos}) | {xp}{p_news}")
+                
+            team_str = f"\n\nUSER'S CURRENT SQUAD (FPL ID: {entry_id}):\n" + "\n".join(squad_lines)
+            team_str += f"\nBank: £{team.bank}m | Free Transfers: {team.free_transfers}\n"
+            
+        except Exception as e:
+            team_str = f"\n\n(Could not load team data: {str(e)})\n"
+
+    # 3. Formulate the prompt
+    system_prompt = """
+    You are an Expert FPL (Fantasy Premier League) Analyst and Tactical Advisor.
+    Your job is to provide a comprehensive, deeply analytical briefing based on the data provided.
+    
+    Do NOT invent players or transfer rumours. Only use the data provided.
+    """
+
+    user_prompt = f"""
+    Here is the latest league-wide injury news:
+    {global_news_str if global_news_str else "No major injuries for heavily owned players."}
+    """
+
+    if team_str:
+        user_prompt += f"""
+        Here is the user's current FPL squad (with their projected expected points for the next GW):
+        {team_str}
+        
+        Please provide a detailed 'Manager Briefing' with the following sections:
+        1. **Squad Health Check**: Which of the user's players are injured, doubtful, or suspended? How does this impact their GW score?
+        2. **Team Strengths & Weaknesses**: Analyze their squad. Who are the standout players based on xP? Who are the weakest links?
+        3. **Global News Impact**: How does the global injury news affect the user's team? (e.g., "Since Haaland is doubtful, your Man City assets are at risk").
+        4. **Transfer Recommendations**: Based on the news and their bank/free transfers, who should they sell? Who should they buy to improve the squad? 
+        5. **Captaincy Advice**: Who should be captain based on the data?
+        
+        Keep the tone professional, analytical, and actionable. Use markdown formatting.
+        """
+    else:
+         user_prompt += """
+         The user has not provided their FPL ID. Please provide a general 'League Briefing' summarizing the most critical injury news and which FPL managers are most affected.
+         """
+
+    try:
+        client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL or None)
+        response = client.chat.completions.create(
+            model="qwen/qwen3.8-27b", 
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=1200,
+            temperature=0.3 # Slightly higher temp for better analytical flow
+        )
+        return {"briefing": response.choices[0].message.content}
+    except Exception as e:
+        raise HTTPException(500, detail=f"LLM Request Failed: {str(e)}")

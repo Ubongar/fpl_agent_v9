@@ -1,36 +1,12 @@
-"""The daily orchestrator. One command, whole system.
-
-Replaces v5's ops/retrain_job.py, which ingested a snapshot, evaluated a
-hardcoded three-literal calibration curve, and exited 1 -- unconditionally,
-on every run, forever.
-
-Stage order and failure policy:
-
-    ingest        FAIL HARD on input quality gates. Bad data in is the one
-                  thing you cannot recover from downstream.
-    ownership     SOFT-FAIL. Calls FPL's public-but-unofficial picks
-                  endpoints. Rate limits and transient outages are expected;
-                  the objective falls back to raw ownership when it fails.
-    fit/predict   FAIL HARD on output sanity (unordered quantiles,
-                  probabilities outside [0,1], zero spread).
-    evaluate      NEVER fails the run. Evaluation reports; it does not gate.
-                  A model that scores badly at GW5 should still produce
-                  predictions -- you cannot improve what you cannot see. What
-                  a bad evaluation does is refuse to PROMOTE the version.
-
-    promote       Gated on beating the baselines, which is a real bar
-                  rather than a noise-dominated accuracy threshold.
-
-The distinction between "produce output" and "promote a version" is the one
-v5 collapsed, and collapsing it is what made bypassing the gate feel
-necessary.
-"""
+"""The daily orchestrator. One command, whole system."""
 
 from __future__ import annotations
 
+import json
 import logging
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -46,6 +22,12 @@ from fplagent.db.repository import (
 from fplagent.db.session import init_db
 
 log = logging.getLogger(__name__)
+
+STATUS_FILE = Path("data/pipeline_status.json")
+
+def _update_status(status: str, message: str):
+    STATUS_FILE.parent.mkdir(exist_ok=True, parents=True)
+    STATUS_FILE.write_text(json.dumps({"status": status, "message": message}))
 
 
 def run_daily(
@@ -68,6 +50,7 @@ def run_daily(
     error = None
 
     try:
+        _update_status("running", "Ingesting FPL API and Odds...")
         # ---------------- ingest ----------------------------------------
         if not skip_ingest:
             from fplagent.ingestion.pipeline import run_full_ingest
@@ -79,8 +62,6 @@ def run_daily(
                 fbref_csv=fbref_csv,
             )
 
-            # The market is the strongest free prior available and v6 never
-            # wrote a single row of it. Soft-fails on a missing key.
             from fplagent.ingestion.odds import ingest_odds
 
             stages["odds"] = {"fixtures_priced": ingest_odds(season)}
@@ -103,13 +84,8 @@ def run_daily(
             "source": "fpl_api_events",
         }
 
+        _update_status("running", "Sampling Effective Ownership...")
         # ---------------- effective ownership (SOFT-FAIL) ----------------
-        # The rank-aware objective's differential term reads EO and falls
-        # back to raw ownership when it is missing. That fallback is a real
-        # degradation: ownership and EO diverge hardest on the captaincy-
-        # heavy premiums, which are exactly the players the risk tilt is
-        # supposed to weight correctly. Sampling is optional and can be
-        # turned off for CI or offline runs.
         if sample_ownership:
             try:
                 from fplagent.ingestion.ownership import sample_effective_ownership
@@ -128,6 +104,7 @@ def run_daily(
         else:
             stages["ownership"] = {"skipped": True}
 
+        _update_status("running", "Training Minutes Model & Running Predictions...")
         # ---------------- predict ---------------------------------------
         from fplagent.pipeline.predict import model_version, run_predictions
 
@@ -153,6 +130,7 @@ def run_daily(
             ),
         }
 
+        _update_status("running", "Evaluating Model Performance...")
         # ---------------- evaluate (reports, never blocks) ---------------
         if evaluate and gw > 2:
             try:
@@ -195,13 +173,6 @@ def run_daily(
             }
 
         else:
-            # The message below is deliberately explicit about WHY there
-            # are no scored rows. On a fresh deployment the backtest reads
-            # stored predictions created before each historical deadline;
-            # if the pipeline has only been running for a few days, none
-            # exist yet, and "n=0" is expected rather than a failure. Users
-            # who saw the old "not enough evidence" message reasonably
-            # assumed something was broken.
             stages["promote"] = {
                 "promoted": None,
                 "reason": (
@@ -215,9 +186,6 @@ def run_daily(
                 ),
             }
 
-        # The decision is recorded where it can be read. It used to live
-        # only inside pipeline_runs.stages, and `model_versions` -- the table
-        # built to hold it -- was never written.
         upsert(
             T.model_versions,
             [
@@ -245,10 +213,12 @@ def run_daily(
         )
 
         status = "ok"
+        _update_status("idle", "Pipeline finished successfully.")
 
     except Exception as e:  # noqa: BLE001
         status = "failed"
         error = f"{e}\n{traceback.format_exc()}"
+        _update_status("error", f"Pipeline failed: {str(e)}")
 
         log.error(
             "pipeline failed: %s",
@@ -283,22 +253,7 @@ def latest_predictions(
     season: int = CURRENT_SEASON,
     gw: int | None = None,
 ):
-    """Most recent model version's predictions, aggregated to gameweek level.
-
-    With no `gw`, this is ONE gameweek: the target gameweek from the stored
-    FPL events when it has predictions, else the newest version's first
-    gameweek. v7 returned every gameweek the newest version touched, so any
-    version spanning two gameweeks listed each player twice -- enough to
-    make /optimise/transfers reject a valid 15-man squad.
-
-    If the target gameweek has no predictions yet, this returns an EMPTY
-    frame rather than falling back to an older gameweek. The previous
-    behaviour silently returned the last predicted gameweek as if it were
-    the target, which was fine in the demo (target == predicted) and
-    actively misleading on live data where a gap of one or more gameweeks
-    is easy to hit. Silent stale data is worse than an honest empty frame.
-    """
-
+    """Most recent model version's predictions, aggregated to gameweek level."""
     import pandas as pd
 
     conds = [
@@ -353,21 +308,10 @@ def latest_predictions(
         )
     )
 
-    # Double gameweeks are convolved, not min/max-ed. v6 took xp_p10 as the
-    # MINIMUM across fixtures and xp_p90 as the MAXIMUM, which are not the
-    # gameweek's percentiles and are not even close for a two-fixture week.
-    # Every consumer of this function -- the squad ILP, captaincy, the UI --
-    # was reading ceilings that had never been computed.
     from fplagent.pipeline.predict import aggregate_to_gameweek
 
     agg = aggregate_to_gameweek(df)
 
-    # Enrich predictions with player metadata.
-    #
-    # aggregate_to_gameweek() may already contain team_id, position and
-    # now_cost. Merging those same columns from players would create
-    # team_id_x/team_id_y (and similar columns), leaving no plain team_id
-    # for the team-name merge below.
     player_meta = players[
         [
             "player_id",
@@ -378,8 +322,6 @@ def latest_predictions(
         ]
     ].drop_duplicates("player_id")
 
-    # web_name is not normally present in the aggregate, so merge it
-    # directly.
     agg = agg.merge(
         player_meta[
             [
@@ -391,8 +333,6 @@ def latest_predictions(
         how="left",
     )
 
-    # Use player metadata as a fallback when the prediction aggregate
-    # does not contain these fields.
     for column in (
         "position",
         "team_id",
@@ -419,7 +359,6 @@ def latest_predictions(
                 how="left",
             )
 
-    # Add the team's short name using the clean team_id column.
     if not teams.empty:
         agg = agg.merge(
             teams[
@@ -432,9 +371,6 @@ def latest_predictions(
             how="left",
         )
 
-    # Ownership lives only in the snapshots. Without it every consumer that
-    # reads `selected_by_percent` -- the captaincy objective's template
-    # discount above all -- silently saw 0% for every player.
     snaps = latest_snapshot_per_player(season)
 
     if (
@@ -452,7 +388,6 @@ def latest_predictions(
             how="left",
         )
 
-    # Prevent division by zero when calculating value.
     agg["value"] = (
         agg["xp_mean"]
         / agg["now_cost"].replace(

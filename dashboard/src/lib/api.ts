@@ -10,16 +10,6 @@ import type {
   TeamStrength,
 } from "./types";
 
-/**
- * Server-side fetch helper.
- *
- * Calls go straight to the FastAPI service from the server component, and
- * through Next's rewrite from the browser, so the browser only ever sees one
- * origin and CORS never enters the picture locally.
- *
- * `cache: "no-store"` throughout: predictions change every time the pipeline
- * runs, and a stale projection is worse than a slow one.
- */
 const SERVER_BASE = process.env.FPL_API_URL ?? "http://127.0.0.1:8000";
 const BASE = typeof window === "undefined" ? SERVER_BASE : "/api";
 
@@ -45,7 +35,14 @@ async function get<T>(path: string): Promise<T> {
       0,
     );
   }
-  if (!res.ok) throw new ApiError(`${path} returned ${res.status}`, res.status);
+  if (!res.ok) {
+    let detail = `${path} returned ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body && body.detail) detail = body.detail;
+    } catch {}
+    throw new ApiError(detail, res.status);
+  }
   return (await res.json()) as T;
 }
 
@@ -58,7 +55,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
     cache: "no-store",
   });
-  if (!res.ok) throw new ApiError(`${path} returned ${res.status}`, res.status);
+  if (!res.ok) {
+    let detail = `${path} returned ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body && body.detail) detail = body.detail;
+    } catch {}
+    throw new ApiError(detail, res.status);
+  }
   return (await res.json()) as T;
 }
 
@@ -154,3 +158,9 @@ export const modelDashboard = () =>
 
 export const managerTeam = (entryId: number, gw?: number) =>
   get<import("./types").ManagerTeam>(`/manager/${entryId}/team${gw != null ? `?gw=${gw}` : ""}`);
+
+export const pipelineStatus = () =>
+  get<{ status: string; message: string }>("/pipeline/status");
+
+export const newsBriefing = () =>
+  get<{ briefing: string }>("/news/briefing");

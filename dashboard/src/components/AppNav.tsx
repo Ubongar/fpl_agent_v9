@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
-import { useState } from 'react';
 
 const GROUPS = [
   {
     label: "Core",
     items: [
       ["/", "Command Center", "⌂"],
+      ["/news", "Team News", "📰"],
       ["/players", "Player Lab", "PL"],
       ["/compare", "Player Compare", "VS"],
       ["/manager", "My Team", "MT"],
@@ -83,7 +83,7 @@ export function AppNav() {
 
 export function MobileNav() {
   const pathname = usePathname();
-  const items = [["/", "Home"], ["/players", "Players"], ["/compare", "Compare"], ["/manager", "My Team"], ["/transfers", "Transfers"]] as const;
+  const items = [["/", "Home"], ["/news", "News"], ["/players", "Players"], ["/compare", "Compare"], ["/manager", "My Team"], ["/transfers", "Transfers"]] as const;
   return (
     <nav className="border-b border-line bg-bg/95 px-3 py-2 lg:hidden">
       <div className="flex gap-1 overflow-x-auto scrollbar-thin pb-0.5">
